@@ -19,6 +19,7 @@ namespace EtlStudio.Core
         public string SqlServer { get; set; } = "localhost";
         public string Dsn { get; set; } = "";
         public string Model { get; set; } = "claude-sonnet-5";
+        public string WorkspaceId { get; set; } = "";   // opcional: solo si tu API key no esta asociada a un workspace
         public string ApiKeyProtected { get; set; } = "";
 
         static string PathFile { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EtlStudio", "settings.json"); } }

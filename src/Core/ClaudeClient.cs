@@ -11,8 +11,8 @@ namespace EtlStudio.Core
     /// <summary>Cliente minimo de la API de Anthropic (Messages), con texto, PDF e imagenes. Usa tu propia API key.</summary>
     public class ClaudeClient
     {
-        readonly string apiKey, model;
-        public ClaudeClient(string apiKey, string model) { this.apiKey = apiKey; this.model = model; }
+        readonly string apiKey, model, workspaceId;
+        public ClaudeClient(string apiKey, string model, string workspaceId = null) { this.apiKey = apiKey; this.model = model; this.workspaceId = workspaceId; }
 
         public class Turn
         {
@@ -48,6 +48,7 @@ namespace EtlStudio.Core
             var req = (HttpWebRequest)WebRequest.Create("https://api.anthropic.com/v1/messages");
             req.Method = "POST"; req.ContentType = "application/json"; req.Timeout = 300000;
             req.Headers["x-api-key"] = apiKey; req.Headers["anthropic-version"] = "2023-06-01";
+            if (!string.IsNullOrWhiteSpace(workspaceId)) req.Headers["anthropic-workspace-id"] = workspaceId.Trim();
             using (var s = req.GetRequestStream()) s.Write(data, 0, data.Length);
 
             try

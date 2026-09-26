@@ -30,7 +30,7 @@ namespace EtlStudio.UI
         ContentControl host; UIElement[] pages; RadioButton[] navButtons;
         TextBlock status;
         // Ajustes
-        PasswordBox pwdKey; ComboBox cmbModel; TextBlock keyState;
+        PasswordBox pwdKey; ComboBox cmbModel; TextBlock keyState; TextBox txtWorkspace;
         // Entorno (compartido)
         ComboBox cmbServer, cmbDsn;
         // Inicio
@@ -209,6 +209,9 @@ namespace EtlStudio.UI
             c1.Children.Add(Note("Tu API key se guarda cifrada con DPAPI (solo tu usuario de Windows) en %APPDATA%\\EtlStudio, o se lee de ANTHROPIC_API_KEY. Nunca se sube a ningun repositorio."));
             pwdKey = new PasswordBox { Padding = new Thickness(10, 8, 10, 8) }; c1.Children.Add(pwdKey);
             cmbModel = new ComboBox { IsEditable = true, Margin = new Thickness(0, 8, 0, 0) }; c1.Children.Add(cmbModel);
+            c1.Children.Add(Lbl("Workspace ID (opcional)"));
+            c1.Children.Add(Note("Solo si la API responde \"This API key is not scoped to a workspace\": copia el ID (wrkspc_...) de tu workspace en console.anthropic.com > Settings > Workspaces."));
+            txtWorkspace = Box(); txtWorkspace.Text = settings.WorkspaceId ?? ""; c1.Children.Add(txtWorkspace);
             keyState = new TextBlock { Margin = new Thickness(0, 8, 0, 0) }; c1.Children.Add(keyState);
             c1.Children.Add(Row(Btn("Guardar", (s, e) => SaveSettings())));
             p.Children.Add(Theme.Card(c1));
@@ -226,7 +229,7 @@ namespace EtlStudio.UI
 
         void SaveSettings()
         {
-            settings.SqlServer = ServerName; settings.Dsn = DsnName; settings.Model = cmbModel.Text.Trim();
+            settings.SqlServer = ServerName; settings.Dsn = DsnName; settings.Model = cmbModel.Text.Trim(); settings.WorkspaceId = txtWorkspace.Text.Trim();
             if (pwdKey.Password.Length > 0) { settings.SetApiKey(pwdKey.Password); pwdKey.Clear(); }
             settings.Save(); UpdateKeyState(); SetStatus("Ajustes guardados.");
         }
@@ -242,7 +245,7 @@ namespace EtlStudio.UI
         {
             var key = settings.GetApiKey();
             if (string.IsNullOrEmpty(key)) throw new InvalidOperationException("Configura tu API key de Anthropic en Ajustes.");
-            return new ClaudeClient(key, string.IsNullOrEmpty(settings.Model) ? "claude-sonnet-5" : settings.Model);
+            return new ClaudeClient(key, string.IsNullOrEmpty(settings.Model) ? "claude-sonnet-5" : settings.Model, settings.WorkspaceId);
         }
 
         // ======================================================================
