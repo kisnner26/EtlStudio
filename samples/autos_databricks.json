@@ -1,0 +1,39 @@
+{
+  "DwName": "DW_Autos_Demo",
+  "SqlServer": "localhost",
+  "SourceDsn": "Databricks_DSN",
+  "SourceQuery": "SELECT id_venta, fecha_venta, sucursal, vin_corto, marca, modelo, tipo_motor, precio_lista, costo_fabricacion, extras_instalados, comision_vendedor FROM caso_autos.bronze.ventas_autos_crudo",
+  "Time": { "Name": "Dim_Tiempo", "From": "2023-01-01", "To": "2030-12-31" },
+  "Dims": [
+    { "Name": "Dim_Sucursal", "Key": "SK_Sucursal", "Columns": [ { "Src": "sucursal", "Dst": "Nombre_Sucursal", "Type": "VARCHAR(100)" } ] },
+    { "Name": "Dim_Vehiculo", "Key": "SK_Vehiculo", "Columns": [
+      { "Src": "vin_corto", "Dst": "VIN_Corto", "Type": "VARCHAR(50)" },
+      { "Src": "marca", "Dst": "Marca", "Type": "VARCHAR(50)" },
+      { "Src": "modelo", "Dst": "Modelo", "Type": "VARCHAR(50)" },
+      { "Src": "tipo_motor", "Dst": "Tipo_Motor", "Type": "VARCHAR(50)" } ] }
+  ],
+  "Fact": {
+    "Name": "Fact_VentasAutos",
+    "DateColumn": "fecha_venta",
+    "BusinessKey": { "Src": "id_venta", "Dst": "ID_Venta_Origen", "Type": "VARCHAR(50)" },
+    "Measures": [
+      { "Src": "precio_lista", "Dst": "Precio_Lista", "Type": "DECIMAL(18,2)" },
+      { "Src": "costo_fabricacion", "Dst": "Costo_Fabricacion", "Type": "DECIMAL(18,2)" },
+      { "Src": "extras_instalados", "Dst": "Extras_Instalados", "Type": "DECIMAL(18,2)" },
+      { "Src": "comision_vendedor", "Dst": "Comision_Vendedor", "Type": "DECIMAL(18,2)" }
+    ],
+    "Computed": [
+      { "Name": "Ingreso_Total", "Expr": "(Precio_Lista + Extras_Instalados)" },
+      { "Name": "Margen_Bruto", "Expr": "((Precio_Lista + Extras_Instalados) - Costo_Fabricacion)" }
+    ]
+  },
+  "Goals": {
+    "Table": "Fact_MetasVentas",
+    "ExcelPath": "C:\\ruta\\a\\Metas_Ventas_2024.xlsx",
+    "Sheet": "Metas_2024$",
+    "DimName": "Dim_Sucursal",
+    "ExcelDimColumn": "Sucursal",
+    "ExcelDateColumn": "Fecha",
+    "ExcelMeasureColumn": "Monto_Meta"
+  }
+}

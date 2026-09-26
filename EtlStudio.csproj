@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <ProjectGuid>{5B0C0F3A-7E44-4C1B-9E51-2D6A9D1F0A11}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>EtlStudio</RootNamespace>
+    <AssemblyName>EtlStudio</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <SsisVer>v4.0_16.0.0.0__89845dcd8080cc91</SsisVer>
+    <Gac>$(windir)\Microsoft.NET\assembly</Gac>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <!-- Runtime de SSIS 2022 (v16): requiere SQL Server Integration Services / extension SSIS de Visual Studio instalados. -->
+    <Reference Include="Microsoft.SqlServer.ManagedDTS">
+      <HintPath>$(Gac)\GAC_MSIL\Microsoft.SqlServer.ManagedDTS\$(SsisVer)\Microsoft.SqlServer.ManagedDTS.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Microsoft.SqlServer.DTSPipelineWrap">
+      <HintPath>$(Gac)\GAC_MSIL\Microsoft.SqlServer.DTSPipelineWrap\$(SsisVer)\Microsoft.SqlServer.DTSPipelineWrap.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Microsoft.SqlServer.DTSRuntimeWrap">
+      <HintPath>$(Gac)\GAC_64\Microsoft.SqlServer.DTSRuntimeWrap\$(SsisVer)\Microsoft.SqlServer.DTSRuntimeWrap.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="src\Program.cs" />
+    <Compile Include="src\Core\Spec.cs" />
+    <Compile Include="src\Core\DdlGenerator.cs" />
+    <Compile Include="src\Core\SsisBuilder.cs" />
+    <Compile Include="src\Core\Tools.cs" />
+    <Compile Include="src\Core\ClaudeClient.cs" />
+    <Compile Include="src\Core\Verification.cs" />
+    <Compile Include="src\UI\MainWindow.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

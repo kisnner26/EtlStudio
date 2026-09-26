@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+# Nunca subir secretos ni salidas locales
+settings.json
+*.key
+.env
+*.dtsx
+!samples/*.dtsx
