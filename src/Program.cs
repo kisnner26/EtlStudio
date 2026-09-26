@@ -25,6 +25,20 @@ namespace EtlStudio
                 Console.OutputEncoding = System.Text.Encoding.UTF8;
                 Console.WriteLine(DdlGenerator.Tables(DwSpec.FromJson(File.ReadAllText(args[1])))); return 0;
             }
+            if (args.Length >= 2 && args[0] == "--ask")
+            {
+                // Prueba rapida del motor de IA con Claude Code (suscripcion): EtlStudio.exe --ask "hola"
+                try
+                {
+                    var exe = ClaudeCodeClient.FindExe();
+                    if (exe == null) throw new Exception("No se encontro Claude Code.");
+                    Console.OutputEncoding = System.Text.Encoding.UTF8;
+                    Console.WriteLine("Claude Code: " + exe);
+                    Console.WriteLine(new ClaudeCodeClient(exe).Send("Responde de forma breve.", new[] { new ClaudeClient.Turn { Role = "user", Text = args[1] } }));
+                    return 0;
+                }
+                catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
+            }
             if (args.Length >= 2 && args[0] == "--readdoc")
             {
                 Console.OutputEncoding = System.Text.Encoding.UTF8;

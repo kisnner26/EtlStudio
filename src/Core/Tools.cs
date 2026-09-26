@@ -19,6 +19,7 @@ namespace EtlStudio.Core
         public string SqlServer { get; set; } = "localhost";
         public string Dsn { get; set; } = "";
         public string Model { get; set; } = "claude-sonnet-5";
+        public string Provider { get; set; } = "cli";   // "cli" = Claude Code con tu suscripcion (sin API key) | "api" = API de Anthropic (de pago)
         public string WorkspaceId { get; set; } = "";   // opcional: solo si tu API key no esta asociada a un workspace
         public string ApiKeyProtected { get; set; } = "";
 

@@ -9,7 +9,7 @@ using System.Web.Script.Serialization;
 namespace EtlStudio.Core
 {
     /// <summary>Cliente minimo de la API de Anthropic (Messages), con texto, PDF e imagenes. Usa tu propia API key.</summary>
-    public class ClaudeClient
+    public class ClaudeClient : ILlm
     {
         readonly string apiKey, model, workspaceId;
         public ClaudeClient(string apiKey, string model, string workspaceId = null) { this.apiKey = apiKey; this.model = model; this.workspaceId = workspaceId; }

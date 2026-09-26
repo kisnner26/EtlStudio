@@ -30,7 +30,7 @@ namespace EtlStudio.UI
         ContentControl host; UIElement[] pages; RadioButton[] navButtons;
         TextBlock status;
         // Ajustes
-        PasswordBox pwdKey; ComboBox cmbModel; TextBlock keyState; TextBox txtWorkspace;
+        PasswordBox pwdKey; ComboBox cmbModel; TextBlock keyState, cliState; TextBox txtWorkspace; RadioButton rbCli, rbApi; string cliExe;
         // Entorno (compartido)
         ComboBox cmbServer, cmbDsn;
         // Inicio
@@ -205,14 +205,29 @@ namespace EtlStudio.UI
         {
             var p = new StackPanel();
             var c1 = new StackPanel();
-            c1.Children.Add(new TextBlock { Text = "Claude (API de Anthropic, de pago)", FontWeight = FontWeights.SemiBold, FontSize = 15 });
-            c1.Children.Add(Note("Tu API key se guarda cifrada con DPAPI (solo tu usuario de Windows) en %APPDATA%\\EtlStudio, o se lee de ANTHROPIC_API_KEY. Nunca se sube a ningun repositorio."));
-            pwdKey = new PasswordBox { Padding = new Thickness(10, 8, 10, 8) }; c1.Children.Add(pwdKey);
-            cmbModel = new ComboBox { IsEditable = true, Margin = new Thickness(0, 8, 0, 0) }; c1.Children.Add(cmbModel);
-            c1.Children.Add(Lbl("Workspace ID (opcional)"));
-            c1.Children.Add(Note("Solo si la API responde \"This API key is not scoped to a workspace\": copia el ID (wrkspc_...) de tu workspace en console.anthropic.com > Settings > Workspaces."));
-            txtWorkspace = Box(); txtWorkspace.Text = settings.WorkspaceId ?? ""; c1.Children.Add(txtWorkspace);
-            keyState = new TextBlock { Margin = new Thickness(0, 8, 0, 0) }; c1.Children.Add(keyState);
+            c1.Children.Add(new TextBlock { Text = "Motor de IA", FontWeight = FontWeights.SemiBold, FontSize = 15 });
+            c1.Children.Add(Note("Elige cómo se conecta EtlStudio con Claude."));
+
+            rbCli = new RadioButton { GroupName = "prov", IsChecked = settings.Provider != "api", Margin = new Thickness(0, 6, 0, 0), FontSize = 13.5,
+                Content = "Usar mi suscripción de Claude (Claude Code): sin API key y sin crédito de API" };
+            cliState = new TextBlock { Margin = new Thickness(22, 2, 0, 2), FontSize = 12.5, Text = "Buscando Claude Code…", Foreground = Theme.B(Theme.Muted) };
+            c1.Children.Add(rbCli); c1.Children.Add(cliState);
+            var cliRow = Row(Btn("Iniciar sesión de Claude", (s, e) => LoginClaude(), true), Btn("Probar Claude", (s, e) => TestClaude(), true)); cliRow.Margin = new Thickness(22, 6, 0, 0);
+            c1.Children.Add(cliRow);
+            c1.Children.Add(Note("Usa el Claude Code de tu equipo con tu propia sesión. La app no ve ni guarda tus credenciales; solo ejecuta el programa. El consumo sale de tu plan de Claude."));
+            Task.Run(() => { cliExe = ClaudeCodeClient.FindExe(); Dispatcher.Invoke(() => { cliState.Text = cliExe != null ? "✔  Claude Code encontrado (" + ClaudeCodeClient.VersionText(cliExe) + ")" : "No encontré Claude Code. Instala la app de Claude o usa la API."; cliState.Foreground = Theme.B(cliExe != null ? Theme.Green : Theme.Red); }); });
+
+            rbApi = new RadioButton { GroupName = "prov", IsChecked = settings.Provider == "api", Margin = new Thickness(0, 14, 0, 0), FontSize = 13.5, Content = "Usar la API de Anthropic (de pago, con API key)" };
+            c1.Children.Add(rbApi);
+            var api = new StackPanel { Margin = new Thickness(22, 4, 0, 0) };
+            api.Children.Add(Note("Tu API key se guarda cifrada con DPAPI (solo tu usuario de Windows) en %APPDATA%\\EtlStudio, o se lee de ANTHROPIC_API_KEY. Requiere saldo en console.anthropic.com."));
+            pwdKey = new PasswordBox { Padding = new Thickness(10, 8, 10, 8) }; api.Children.Add(pwdKey);
+            cmbModel = new ComboBox { IsEditable = true, Margin = new Thickness(0, 8, 0, 0) }; api.Children.Add(cmbModel);
+            api.Children.Add(Lbl("Workspace ID (opcional)"));
+            api.Children.Add(Note("Solo si la API responde \"This API key is not scoped to a workspace\": copia el ID (wrkspc_...) de tu workspace."));
+            txtWorkspace = Box(); txtWorkspace.Text = settings.WorkspaceId ?? ""; api.Children.Add(txtWorkspace);
+            keyState = new TextBlock { Margin = new Thickness(0, 8, 0, 0) }; api.Children.Add(keyState);
+            c1.Children.Add(api);
             c1.Children.Add(Row(Btn("Guardar", (s, e) => SaveSettings())));
             p.Children.Add(Theme.Card(c1));
 
@@ -230,6 +245,7 @@ namespace EtlStudio.UI
         void SaveSettings()
         {
             settings.SqlServer = ServerName; settings.Dsn = DsnName; settings.Model = cmbModel.Text.Trim(); settings.WorkspaceId = txtWorkspace.Text.Trim();
+            settings.Provider = rbApi.IsChecked == true ? "api" : "cli";
             if (pwdKey.Password.Length > 0) { settings.SetApiKey(pwdKey.Password); pwdKey.Clear(); }
             settings.Save(); UpdateKeyState(); SetStatus("Ajustes guardados.");
         }
@@ -241,11 +257,35 @@ namespace EtlStudio.UI
             keyState.Foreground = Theme.B(ok ? Theme.Green : Theme.Red);
         }
 
-        ClaudeClient Claude()
+        ILlm Claude()
         {
-            var key = settings.GetApiKey();
-            if (string.IsNullOrEmpty(key)) throw new InvalidOperationException("Configura tu API key de Anthropic en Ajustes.");
-            return new ClaudeClient(key, string.IsNullOrEmpty(settings.Model) ? "claude-sonnet-5" : settings.Model, settings.WorkspaceId);
+            if (settings.Provider == "api")
+            {
+                var key = settings.GetApiKey();
+                if (string.IsNullOrEmpty(key)) throw new InvalidOperationException("Configura tu API key de Anthropic en Ajustes.");
+                return new ClaudeClient(key, string.IsNullOrEmpty(settings.Model) ? "claude-sonnet-5" : settings.Model, settings.WorkspaceId);
+            }
+            if (cliExe == null) cliExe = ClaudeCodeClient.FindExe();
+            if (cliExe == null) throw new InvalidOperationException("No encontré Claude Code instalado. Instala la app de Claude (o npm i -g @anthropic-ai/claude-code), o usa la API en Ajustes.");
+            return new ClaudeCodeClient(cliExe);
+        }
+
+        void LoginClaude()
+        {
+            var exe = cliExe ?? ClaudeCodeClient.FindExe();
+            if (exe == null) { MessageBox.Show(this, "No encontré Claude Code en este equipo.", "Claude"); return; }
+            ClaudeCodeClient.OpenLoginTerminal(exe);
+            SetStatus("Inicia sesión en la ventana que se abrió (escribe /login si te lo pide) y luego pulsa 'Probar Claude'.");
+        }
+
+        void TestClaude()
+        {
+            SaveSettings();
+            Work("Probar Claude", () =>
+            {
+                var r = Claude().Send("Responde solo con la palabra LISTO.", new[] { new ClaudeClient.Turn { Role = "user", Text = "Hola" } });
+                Say("Claude respondió: " + r.Trim());
+            });
         }
 
         // ======================================================================
@@ -419,7 +459,8 @@ namespace EtlStudio.UI
             if (busy) return;
             string prompt = txtPrompt.Text.Trim();
             if (prompt.Length == 0 && attachments.Count == 0) { MessageBox.Show(this, "Escribe lo que necesitas o suelta un archivo.", "EtlStudio"); return; }
-            if (string.IsNullOrEmpty(settings.GetApiKey())) { MessageBox.Show(this, "Primero configura tu API key de Anthropic en Ajustes.", "EtlStudio"); ShowPage(5); return; }
+            if (settings.Provider == "api" ? string.IsNullOrEmpty(settings.GetApiKey()) : (cliExe == null && (cliExe = ClaudeCodeClient.FindExe()) == null))
+            { MessageBox.Show(this, "Primero configura Claude en Ajustes (tu suscripción con Claude Code, o una API key).", "EtlStudio"); ShowPage(5); return; }
             if (attachments.Any(a => a.Kind != "text") &&
                 MessageBox.Show(this, "Vas a enviar PDF o imágenes completos a la API de Anthropic. Pueden contener credenciales que no puedo ocultar.\n\n¿Continuar?", "Privacidad", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
 

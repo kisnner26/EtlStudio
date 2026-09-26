@@ -39,7 +39,9 @@ El paquete generado sigue el patron del curso: `SQL_Limpiar_Destino` -> `DFT_Pob
 - **Runtime de SSIS 2022 (v16)**: `dtexec` en `C:\Program Files\Microsoft SQL Server\160\DTS\Binn` y los ensamblados `Microsoft.SqlServer.ManagedDTS`, `DTSPipelineWrap` y `DTSRuntimeWrap` en el GAC (vienen con SQL Server Integration Services o con la extension SSIS de Visual Studio)
 - Driver ODBC del origen (p. ej. Databricks ODBC / Simba) y un DSN configurado; el token vive en el DSN, no en esta app
 - Para metas desde Excel: proveedor `Microsoft.ACE.OLEDB.16.0` (64 bits)
-- Una API key de Anthropic (de pago): https://console.anthropic.com
+- **Claude**, de una de estas dos formas (se elige en *Ajustes*):
+  - **Tu suscripcion de Claude, vía Claude Code** (por defecto, sin API key ni crédito de API): la app ejecuta el `claude` instalado con tu propia sesión (`claude -p`). Inicia sesión una vez desde *Ajustes → Iniciar sesión de Claude*. El consumo sale de tu plan.
+  - **API de Anthropic** (de pago, con API key y saldo): https://console.anthropic.com
 
 ## Compilar
 
