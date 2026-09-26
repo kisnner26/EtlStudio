@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{7C1D2E55-31A4-4B7B-A0C2-6E2B8C9F4D02}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>EtlStudio.Setup</RootNamespace>
+    <AssemblyName>EtlStudio-Setup</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <LangVersion>latest</LangVersion>
+    <ApplicationIcon>..\assets\EtlStudio.ico</ApplicationIcon>
+    <OutputPath>..\dist\</OutputPath>
+    <IntermediateOutputPath>obj\</IntermediateOutputPath>
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <AppMain>..\bin\Release\EtlStudio.exe</AppMain>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Setup.cs" />
+    <Compile Include="..\src\UI\Theme.cs"><Link>Theme.cs</Link></Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="$(AppMain)"><LogicalName>payload.exe</LogicalName></EmbeddedResource>
+    <EmbeddedResource Include="..\assets\EtlStudio.ico"><LogicalName>payload.ico</LogicalName></EmbeddedResource>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

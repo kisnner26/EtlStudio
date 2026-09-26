@@ -1,4 +1,4 @@
-# EtlStudio
+﻿# EtlStudio
 
 App de escritorio para Windows que **replica el proceso de armar un Data Warehouse en SQL Server y su paquete SSIS** a partir de un origen ODBC (pensada para Databricks), con **Claude** como asistente.
 
@@ -6,9 +6,24 @@ App de escritorio para Windows que **replica el proceso de armar un Data Warehou
 Origen Databricks (ODBC)  ->  DW en estrella (SQL Server)  +  paquete SSIS (.dtsx)  ->  verificacion
 ```
 
-## Que hace
+## Modo automatico (pantalla de Inicio)
 
-1. **Conexiones**: SQL Server (autenticacion de Windows), DSN ODBC del origen y tu API key de Anthropic.
+Suelta tu enunciado (**PPTX, DOCX, PDF, XLSX, capturas, TXT/SQL**) o descríbelo con un prompt y pulsa **Resolver automaticamente**:
+
+1. Se lee el contenido de los archivos (los tokens y contraseñas se ocultan antes de enviar texto a la IA).
+2. Claude arma un **plan** (conexion, diseño en estrella, pasos, advertencias) y, si el diseño no valida, lo corrige una vez.
+3. Tu **apruebas** el plan con un clic (o lo editas en *Diseño*).
+4. EtlStudio conecta, crea el DW, genera el paquete SSIS, lo valida, carga, verifica y crea un **reporte .docx** con la evidencia.
+
+Si el DSN de Databricks no existe, se crea con el host y el HTTP path del enunciado; **el token lo pegas tu una sola vez** en el dialogo del driver ODBC (la app nunca lo escribe).
+
+## Instalar
+
+Descarga/compila `dist\EtlStudio-Setup.exe` y ejecutalo: instala solo para tu usuario (sin administrador), crea los accesos directos y se registra en *Aplicaciones instaladas*. Instalacion silenciosa: `EtlStudio-Setup.exe /S`.
+
+## Que hace (paginas avanzadas)
+
+1. **Ajustes**: SQL Server (autenticacion de Windows), DSN ODBC del origen y tu API key de Anthropic.
 2. **Fuente**: escribes el `SELECT` de origen y ves esquema y filas de muestra.
 3. **Diseno (IA)**: Claude propone el modelo en estrella (dimensiones, hechos, medidas, columnas calculadas) como JSON editable. Tu lo revisas y validas; nada se crea sin tu accion.
 4. **Ejecutar**: crea la base y las tablas (DDL idempotente), **genera un paquete `.dtsx` real** con el modelo de objetos de SSIS, lo valida y lo ejecuta con `dtexec`.
@@ -29,11 +44,13 @@ El paquete generado sigue el patron del curso: `SQL_Limpiar_Destino` -> `DFT_Pob
 ## Compilar
 
 ```powershell
-MSBuild.exe EtlStudio.csproj /p:Configuration=Release
+.\build.ps1          # compila la app y crea dist\EtlStudio-Setup.exe
 .\bin\Release\EtlStudio.exe
 ```
 
-MSBuild viene con Visual Studio (la ruta cambia segun la version); tambien puedes abrir `EtlStudio.csproj` directamente en Visual Studio.
+`build.ps1` busca MSBuild de Visual Studio automaticamente. El icono se genera por codigo con `tools\make-icon.ps1` (ya incluido en `assets\`). Tambien puedes abrir `EtlStudio.csproj` directamente en Visual Studio.
+
+Notas para contribuir: los fuentes son UTF-8 con BOM; edita con un editor que respete la codificacion.
 
 ## Linea de comandos (pruebas / CI)
 
