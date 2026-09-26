@@ -25,6 +25,9 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Data" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="System.Xml" />
     <Reference Include="System.Security" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Xaml" />
@@ -53,6 +56,10 @@
     <Compile Include="src\Core\Tools.cs" />
     <Compile Include="src\Core\ClaudeClient.cs" />
     <Compile Include="src\Core\Verification.cs" />
+    <Compile Include="src\Core\Documents.cs" />
+    <Compile Include="src\Core\Plan.cs" />
+    <Compile Include="src\Core\DocxWriter.cs" />
+    <Compile Include="src\Core\Pipeline.cs" />
     <Compile Include="src\UI\MainWindow.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

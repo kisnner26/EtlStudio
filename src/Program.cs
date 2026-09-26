@@ -25,6 +25,27 @@ namespace EtlStudio
                 Console.OutputEncoding = System.Text.Encoding.UTF8;
                 Console.WriteLine(DdlGenerator.Tables(DwSpec.FromJson(File.ReadAllText(args[1])))); return 0;
             }
+            if (args.Length >= 2 && args[0] == "--readdoc")
+            {
+                Console.OutputEncoding = System.Text.Encoding.UTF8;
+                var a = DocReader.Load(args[1]);
+                Console.WriteLine("[" + a.Kind + "] " + a.Summary);
+                if (a.Text != null) Console.WriteLine(a.Text.Length > 1500 ? a.Text.Substring(0, 1500) + "\n..." : a.Text);
+                return 0;
+            }
+            if (args.Length >= 3 && args[0] == "--plan")
+            {
+                // Ejecuta un plan (JSON de Claude o escrito a mano) sin ventana: DSN -> DW -> SSIS -> carga -> verificacion -> reporte .docx
+                try
+                {
+                    var plan = Plan.FromJson(File.ReadAllText(args[1]));
+                    var errs = plan.Spec.Validate(); if (errs.Count > 0) throw new Exception(string.Join("; ", errs));
+                    var r = Pipeline.Run(plan, args.Length > 3 && args[3] == "--recreate", args[2],
+                        (id, st) => Console.WriteLine("[" + st + "] " + id), m => Console.WriteLine("    " + m));
+                    Console.WriteLine("Reporte: " + r.ReportPath); return 0;
+                }
+                catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
+            }
             if (args.Length >= 3 && args[0] == "--all")
             {
                 // Flujo completo sin ventana: crear DW -> generar paquete -> validar -> ejecutar -> verificar.

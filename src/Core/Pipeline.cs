@@ -1,0 +1,128 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.IO;
+using System.Linq;
+
+namespace EtlStudio.Core
+{
+    public class PipelineResult
+    {
+        public string PackagePath, ReportPath, VerificationText;
+        public List<KeyValuePair<Check, DataTable>> Checks = new List<KeyValuePair<Check, DataTable>>();
+    }
+
+    /// <summary>Orquesta todo el proceso a partir de un Plan aprobado: DSN -> DW -> paquete SSIS -> validar -> cargar -> verificar -> reporte.</summary>
+    public static class Pipeline
+    {
+        public static readonly string[][] Steps =
+        {
+            new[] { "dsn", "Conectar con el origen" },
+            new[] { "sql", "Conectar con SQL Server" },
+            new[] { "dw", "Crear el Data Warehouse" },
+            new[] { "pkg", "Generar el paquete SSIS" },
+            new[] { "validate", "Validar el paquete" },
+            new[] { "load", "Cargar los datos" },
+            new[] { "verify", "Verificar resultados" },
+            new[] { "report", "Crear el reporte (.docx)" }
+        };
+
+        /// <param name="step">(id, estado: run | ok | fail)</param>
+        public static PipelineResult Run(Plan plan, bool recreate, string outDir, Action<string, string> step, Action<string> log)
+        {
+            var s = plan.Spec; var res = new PipelineResult();
+            Directory.CreateDirectory(outDir);
+            Func<string, Action, bool> stage = (id, work) =>
+            {
+                step(id, "run");
+                try { work(); step(id, "ok"); return true; }
+                catch { step(id, "fail"); throw; }
+            };
+
+            stage("dsn", () =>
+            {
+                bool created = false;
+                if (!Environments.DsnExists(s.SourceDsn))
+                {
+                    var c = plan.Conexion;
+                    if (c == null || string.IsNullOrWhiteSpace(c.Host) || string.IsNullOrWhiteSpace(c.HttpPath))
+                        throw new Exception("No existe el DSN '" + s.SourceDsn + "' y el enunciado no trae host/HTTP path para crearlo. Crealo en el administrador ODBC.");
+                    Environments.CreateUserDsn(s.SourceDsn, c.Host.Trim(), c.HttpPath.Trim()); created = true;
+                    log("DSN '" + s.SourceDsn + "' creado (usuario) con host y HTTP path del enunciado.");
+                }
+                try { log(SourceReader.Test(s.SourceDsn)); }
+                catch (Exception ex)
+                {
+                    if (created || ex.Message.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0 || ex.Message.IndexOf("authent", StringComparison.OrdinalIgnoreCase) >= 0 || ex.Message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0 || ex.Message.IndexOf("token", StringComparison.OrdinalIgnoreCase) >= 0)
+                        throw new NeedsTokenException("Falta el token de acceso en el DSN '" + s.SourceDsn + "'. Abre el administrador ODBC (pestana DSN de usuario), Configure, pega tu token en Password y pulsa OK. Es un paso unico.");
+                    throw;
+                }
+            });
+
+            stage("sql", () => log(SqlRunner.Test(s.SqlServer)));
+
+            stage("dw", () =>
+            {
+                if (recreate) SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.DropDatabase(s));
+                SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.CreateDatabase(s));
+                SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.Tables(s));
+                log("Base '" + s.DwName + "' y tablas listas en " + s.SqlServer + ".");
+            });
+
+            res.PackagePath = Path.Combine(outDir, s.DwName + ".dtsx");
+            stage("pkg", () => { new SsisBuilder(s).Build(res.PackagePath); log("Paquete: " + res.PackagePath); });
+
+            stage("validate", () => Dtx(res.PackagePath, true, log));
+            stage("load", () => Dtx(res.PackagePath, false, log));
+
+            stage("verify", () =>
+            {
+                var text = new System.Text.StringBuilder();
+                foreach (var c in Verification.For(s))
+                {
+                    var dt = SqlRunner.Query(s.SqlServer, s.DwName, c.Sql);
+                    res.Checks.Add(new KeyValuePair<Check, DataTable>(c, dt));
+                    text.AppendLine("## " + c.Title).AppendLine(SourceReader.SampleRows(dt, 12));
+                }
+                res.VerificationText = text.ToString();
+                log("Verificaciones ejecutadas: " + res.Checks.Count + ".");
+            });
+
+            res.ReportPath = Path.Combine(outDir, "Reporte_" + s.DwName + ".docx");
+            stage("report", () => { WriteReport(plan, res); log("Reporte: " + res.ReportPath); });
+            return res;
+        }
+
+        static void Dtx(string pkg, bool validate, Action<string> log)
+        {
+            int code = DtExec.Run(pkg, validate, l => { if (l.Contains("Error") || l.Contains("DTSER") || l.Contains("Elapsed")) log(l.Trim()); });
+            if (code != 0) throw new Exception("dtexec devolvio el codigo " + code + " (" + (validate ? "validacion" : "carga") + ").");
+        }
+
+        static void WriteReport(Plan plan, PipelineResult res)
+        {
+            var s = plan.Spec;
+            var d = new DocxWriter().Title(string.IsNullOrWhiteSpace(plan.Titulo) ? "Reporte del Data Warehouse" : plan.Titulo,
+                "Generado por EtlStudio  ·  " + DateTime.Now.ToString("yyyy-MM-dd HH:mm"));
+            d.Heading("Resumen").Para(plan.Resumen ?? "");
+            d.Heading("Arquitectura");
+            d.Bullet("Base de datos: " + s.DwName + " en " + s.SqlServer);
+            d.Bullet("Origen: DSN " + s.SourceDsn + " (Databricks via ODBC)");
+            d.Bullet("Dimension de tiempo: " + s.Time.Name + " (" + s.Time.From + " a " + s.Time.To + ")");
+            foreach (var dim in s.Dims) d.Bullet("Dimension " + dim.Name + " (" + dim.Key + "): " + string.Join(", ", dim.Columns.Select(c => c.Dst)));
+            d.Bullet("Tabla de hechos " + s.Fact.Name + ": " + string.Join(", ", s.Fact.Measures.Select(m => m.Dst)));
+            if (s.Goals != null) d.Bullet("Metas desde Excel: " + s.Goals.Table);
+            d.Heading("Consulta de origen").Code(s.SourceQuery);
+            d.Heading("Paquete SSIS").Para(res.PackagePath);
+            d.Bullet("SQL_Limpiar_Destino  →  DFT_Poblar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel" : ""));
+            d.Bullet("Conversion de datos a DT_STR, Lookups por dimension, columna derivada SK_Tiempo y carga rapida.");
+            d.Heading("Verificacion");
+            foreach (var kv in res.Checks)
+            {
+                d.Para(kv.Key.Title, true).Para(kv.Key.Explain).Table(kv.Value);
+            }
+            if (plan.Advertencias.Count > 0) { d.Heading("Supuestos y advertencias"); foreach (var a in plan.Advertencias) d.Bullet(a); }
+            d.Save(res.ReportPath);
+        }
+    }
+}
