@@ -37,6 +37,12 @@ public static class CoreTests
 
     static DwSpec Sample() { return DwSpec.FromJson(File.ReadAllText(Path.Combine(Root(), "samples", "autos_databricks.json"))); }
 
+    static DataTable mk(params object[][] rows)
+    {
+        var t = new DataTable(); foreach (var c in new[] { "p_y", "p_m", "n_rows", "sum_precio_lista", "sum_costo_fabricacion", "sum_extras_instalados", "sum_comision_vendedor" }) t.Columns.Add(c, typeof(object));
+        foreach (var r in rows) t.Rows.Add(r); return t;
+    }
+
     static bool Has(List<string> errs, string part) { return errs.Any(e => e.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0); }
 
     static Dictionary<string, object> Row(params object[] kv)
@@ -66,6 +72,13 @@ public static class CoreTests
     {
         // ---------------- validacion del diseno ----------------
         Test("el sample valida", () => { var e = Sample().Validate(); Check(e.Count == 0, "el sample deberia ser valido: " + string.Join("; ", e)); });
+        Test("el ejemplo con todas las opciones valida", () =>
+        {
+            var s = DwSpec.FromJson(File.ReadAllText(Path.Combine(Root(), "samples", "autos_incremental.json")));
+            Check(s.Validate().Count == 0, string.Join("; ", s.Validate()));
+            Check(s.IsIncremental && s.RejectsRows && s.UsesUnknownMember && s.Dims[1].HasNaturalKey, "opciones cargadas");
+            Check(DdlGenerator.Tables(s).Length > 0 && DdlGenerator.Publish(s).Length > 0 && DdlGenerator.StagingPrepare(s).Length > 0, "genera SQL");
+        });
         Test("el ejemplo interno valida", () => { var e = DwSpec.ExampleAutos().Validate(); Check(e.Count == 0, string.Join("; ", e)); });
         Test("ida y vuelta JSON", () => { var a = Sample(); var b = DwSpec.FromJson(a.ToJson()); Check(a.ToJson() == b.ToJson(), "el JSON cambia al reserializar"); });
 
@@ -346,6 +359,14 @@ public static class CoreTests
             Check(PackageInspector.Verify(s, info).Count == 0, "y aun asi es conforme");
         });
 
+        Test("inspector: el orden incluye la fusion de dimensiones y con Reject no exige lookups", () =>
+        {
+            var s = Sample(); s.RejectPolicy = "Reject";
+            Check(PackageInspector.ExpectedOrder(s).SequenceEqual(new[] { "SQL_Auditoria_Inicio", "SQL_Preparar_Staging", "DFT_Poblar_Dimensiones", "SQL_Fusionar_Dimensiones", "DFT_Extraer_Origen", "DFT_Cargar_Metas_Excel", "SQL_Publicar", "SQL_Auditoria_Fin" }), "orden");
+            var info = PackageInspector.Read(FakePackage(s, "0", "1", true));
+            Check(PackageInspector.Verify(s, info).Count == 0, "sin lookups en la Fact no hay NoMatchBehavior que exigir: " + string.Join("; ", PackageInspector.Verify(s, info)));
+        });
+
         // ---------------- registro y avisos ----------------
         Test("registro: escribe, rota y oculta secretos", () =>
         {
@@ -376,6 +397,130 @@ public static class CoreTests
         {
             var t = Requirements.Format(new List<Requirement> { new Requirement { Name = "A", Ok = true, Detail = "ok" }, new Requirement { Name = "B", Ok = false, Detail = "no", Fix = "instala B" } });
             Check(t.Contains("[OK]  A") && t.Contains("[FALTA] B") && t.Contains("-> instala B"), t);
+        });
+
+        // ---------------- carga incremental ----------------
+        Test("incremental: solo el filtro por marca de agua y agrega, no borra", () =>
+        {
+            var s = Sample(); s.LoadMode = "Incremental";
+            Check(s.Validate().Count == 0, string.Join("; ", s.Validate()));
+            Check(s.EffectiveSource() == s.SourceQuery, "sin marca de agua se lee todo");
+            s.Watermark = new DateTime(2024, 6, 30);
+            var q = s.EffectiveSource();
+            Check(q.EndsWith("WHERE q.fecha_venta >= CAST('2024-06-30' AS DATE)") && q.Contains("FROM (SELECT id_venta"), "filtro portable: " + q);
+            var pub = DdlGenerator.Publish(s);
+            Check(!pub.Contains("DELETE FROM dbo.Fact_VentasAutos") && !pub.Contains("DELETE FROM dbo.Dim_"), "no vacia hechos ni dimensiones");
+            Check(pub.Contains("DELETE FROM dbo.Fact_MetasVentas"), "las metas del Excel se reemplazan completas");
+            Check(pub.Contains("WHERE NOT EXISTS (SELECT 1 FROM dbo.Dim_Sucursal x WHERE x.SK_Sucursal = s.SK_Sucursal)"), "dimensiones: solo llaves nuevas");
+            Check(pub.Contains("WHERE NOT EXISTS (SELECT 1 FROM dbo.Fact_VentasAutos x WHERE x.ID_Venta_Origen = j.ID_Venta_Origen)"), "hechos: se reconocen por su llave de negocio");
+            var prep = DdlGenerator.StagingPrepare(s);
+            Check(prep.Contains("INSERT INTO stg.Dim_Sucursal (SK_Sucursal, Nombre_Sucursal) SELECT SK_Sucursal, Nombre_Sucursal FROM dbo.Dim_Sucursal"), "stg parte de las dimensiones existentes");
+            Check(!DdlGenerator.StagingPrepare(Sample()).Contains("FROM dbo.Dim_Sucursal"), "en Full no");
+            s.LoadMode = "Diario"; Check(Has(s.Validate(), "LoadMode"), "modo invalido");
+        });
+        Test("dimensiones: los nuevos miembros se fusionan por llave natural", () =>
+        {
+            var s = Sample(); s.Dims[1].NaturalKey = new List<string> { "vin_corto" };
+            var m = DdlGenerator.MergeDimensions(s);
+            Check(m.Contains("INSERT INTO stg.Dim_Vehiculo (VIN_Corto, Marca, Modelo, Tipo_Motor) SELECT DISTINCT n.VIN_Corto, n.Marca, n.Modelo, n.Tipo_Motor FROM stg.Dim_Vehiculo_Nuevos n WHERE NOT EXISTS (SELECT 1 FROM stg.Dim_Vehiculo x WHERE x.VIN_Corto = n.VIN_Corto);"), m);
+            Check(DdlGenerator.StagingPrepare(s).Contains("CREATE TABLE stg.Dim_Sucursal_Nuevos"), "tabla de aterrizaje");
+            s = Sample(); s.Dims[0].Name = "Dim_Vehiculo_Nuevos"; s.Goals.DimName = "Dim_Vehiculo_Nuevos"; s.Dims[1].Name = "Dim_Vehiculo";
+            Check(Has(s.Validate(), "tablas de paso"), "choque de nombres en stg");
+        });
+
+        // ---------------- rechazos ----------------
+        Test("rechazos: Fact cruda en stg, cruce al publicar y tabla ETL_Rechazos", () =>
+        {
+            var s = Sample(); s.RejectPolicy = "Reject";
+            Check(s.Validate().Count == 0, string.Join("; ", s.Validate()));
+            var raw = DdlGenerator.RawColumns(s);
+            Check(raw.Count == 1 + 1 + 4 + 4 && raw.All(c => c.Name.StartsWith("s_")) && raw.Count(c => c.IsMeasure) == 4, "columnas crudas: " + raw.Count);
+            var prep = DdlGenerator.StagingPrepare(s);
+            Check(prep.Contains("CREATE TABLE stg.Fact_VentasAutos (SK_Tiempo INT NOT NULL, s_sucursal VARCHAR(100) NOT NULL") && !prep.Contains("CREATE TABLE stg.Fact_VentasAutos (SK_Tiempo INT NOT NULL, SK_Sucursal"), "stg cruda");
+            Check(DdlGenerator.Tables(s).Contains("CREATE TABLE dbo.ETL_Rechazos") && DdlGenerator.Tables(s).Contains("Motivo VARCHAR(200) NOT NULL"), "tabla de rechazos");
+            var pub = DdlGenerator.Publish(s);
+            Check(pub.Contains("OUTER APPLY (SELECT TOP 1 x.SK_Sucursal AS k FROM stg.Dim_Sucursal x WHERE x.Nombre_Sucursal = r.s_sucursal") && pub.Contains("INTO #j"), "cruce sin multiplicar filas");
+            Check(pub.Contains("'Sin dimension Dim_Vehiculo'") && pub.Contains("'Fecha fuera de Dim_Tiempo'"), "motivos");
+            Check(pub.Contains("INSERT INTO dbo.ETL_Rechazos") && pub.Contains("WHERE NOT (j.ok_t IS NOT NULL AND j.k_1 IS NOT NULL AND j.k_2 IS NOT NULL)"), "rechazos");
+            Check(pub.Contains("DELETE FROM dbo.ETL_Rechazos") && pub.IndexOf("DROP TABLE #j") < pub.IndexOf("COMMIT TRANSACTION"), "Full vacia rechazos; #j se libera dentro de la transaccion");
+            Check(!DdlGenerator.Publish(Sample()).Contains("ETL_Rechazos"), "con Fail no hay rechazos");
+            s.RejectPolicy = "Otra"; Check(Has(s.Validate(), "RejectPolicy"), "invalida");
+            s = Sample(); s.RejectPolicy = "Reject"; s.Fact.Measures[0].Src = "marca"; Check(Has(s.Validate(), "no puede ser tambien"), "medida repetida");
+        });
+        Test("rechazos: la reconciliacion suma lo rechazado y avisa; las fechas fuera de rango ya no detienen", () =>
+        {
+            var s = Sample(); s.RejectPolicy = "Reject";
+            var d = GoodDest(s); d["n_rows"] = 28L; d["n_bk"] = 28L; d["rej_rows"] = 2L; d["rej_bk"] = 2L;
+            foreach (var m in s.Fact.Measures) { d["sum_" + m.Src] = 900.50m; d["rej_sum_" + m.Src] = 100m; }
+            var r = Reconciliation.Compare(s, GoodProfile(s), d);
+            Check(r.Ok, r.FailureText());
+            Check(r.Lines.Any(l => l.Status == "AVISO" && l.Metric.Contains("rechazadas")), "aviso de rechazadas");
+            d["rej_rows"] = 1L; Check(!Reconciliation.Compare(s, GoodProfile(s), d).Ok, "si faltan filas sigue fallando");
+            var p = GoodProfile(s); p["min_date"] = new DateTime(2019, 1, 1);
+            Check(Reconciliation.Preflight(s, p).Count == 0, "en Reject la fecha fuera de rango se rechaza, no detiene");
+            Check(Reconciliation.DestSql(s).Contains("(SELECT COUNT_BIG(*) FROM dbo.ETL_Rechazos) AS rej_rows") && !Reconciliation.DestSql(Sample()).Contains("rej_"), "SQL del destino");
+            d = GoodDest(s); d["rej_min_date"] = new DateTime(2024, 1, 5); d["min_date"] = new DateTime(2024, 3, 1);
+            Check(Reconciliation.Compare(s, GoodProfile(s), d).Ok, "la fecha minima puede estar entre los rechazados");
+        });
+
+        // ---------------- reconciliacion por periodo ----------------
+        Test("periodos: detecta errores que se compensan en el total", () =>
+        {
+            var s = Sample();
+            Func<int, int, long, decimal, object[]> row = (y, m, n, v) => new object[] { y, m, n, v, v, v, v };
+            var src = mk(row(2024, 1, 10, 100m), row(2024, 2, 20, 200m));
+            Check(Reconciliation.ComparePeriods(s, src, mk(row(2024, 1, 10, 100m), row(2024, 2, 20, 200m))).All(l => l.Status == "OK"), "iguales");
+            // mismas filas y mismo total (300), pero una fila se cargo en el mes equivocado
+            var malo = Reconciliation.ComparePeriods(s, src, mk(row(2024, 1, 11, 110m), row(2024, 2, 19, 190m)));
+            Check(malo.Count(l => l.Status == "DIFERENCIA") == 3 && malo.Any(l => l.Metric == "Periodo 2024-01") && malo.Any(l => l.Metric == "Periodo 2024-02"), "periodos distintos: " + string.Join("; ", malo.Select(l => l.Metric)));
+            Check(Reconciliation.ComparePeriods(s, src, mk(row(2024, 1, 10, 100m))).Any(l => l.Metric == "Periodo 2024-02"), "periodo faltante en el destino");
+            Check(Reconciliation.ComparePeriods(s, src, mk(row(2024, 1, 10, 100.004m), row(2024, 2, 20, 200m))).All(l => l.Status == "OK"), "tolera el redondeo");
+        });
+        Test("periodos: SQL portable y con rechazos", () =>
+        {
+            var q = Reconciliation.PeriodSourceSql(Sample());
+            Check(q.Contains("YEAR(s.fecha_venta) AS p_y") && q.Contains("GROUP BY YEAR(s.fecha_venta), MONTH(s.fecha_venta)") && !q.Contains("LIMIT") && !q.Contains("TOP"), q);
+            Check(!Reconciliation.PeriodDestSql(Sample()).Contains("UNION ALL"), "sin rechazos");
+            var s = Sample(); s.RejectPolicy = "Reject";
+            var d = Reconciliation.PeriodDestSql(s);
+            Check(d.Contains("UNION ALL SELECT r.SK_Tiempo / 10000, (r.SK_Tiempo / 100) % 100") && d.Contains("GROUP BY p_y, p_m"), d);
+        });
+
+        // ---------------- atributos derivados de dimension ----------------
+        Test("dimension: atributos derivados persistidos", () =>
+        {
+            var s = Sample(); s.Dims[1].Computed.Add(new ComputedSpec { Name = "Inicial_Marca", Expr = "UPPER(LEFT(Marca, 1))" });
+            s.Dims[1].Computed.Add(new ComputedSpec { Name = "Segmento", Expr = "CASE WHEN Tipo_Motor = 'Electrico' THEN 'Verde' ELSE 'Otros' END" });
+            Check(s.Validate().Count == 0, string.Join("; ", s.Validate()));
+            var sql = DdlGenerator.Tables(s);
+            Check(sql.Contains("Inicial_Marca AS UPPER(LEFT(Marca, 1)) PERSISTED,") && sql.Contains("Segmento AS CASE WHEN Tipo_Motor = 'Electrico' THEN 'Verde' ELSE 'Otros' END PERSISTED,"), "DDL");
+            Check(!DdlGenerator.StagingPrepare(s).Contains("Inicial_Marca") && !DdlGenerator.Publish(s).Contains("Inicial_Marca"), "staging y publicacion no las tocan: las calcula SQL Server");
+            s.Dims[1].Computed[0].Expr = "Marca + (SELECT 1)"; Check(Has(s.Validate(), "SELECT"), "subconsulta");
+            s.Dims[1].Computed[0].Expr = "LEFT(Otra, 1)"; Check(Has(s.Validate(), "Otra"), "columna ajena");
+            s.Dims[1].Computed[0].Expr = "'a' + 'b"; Check(Has(s.Validate(), "Comillas"), "comillas");
+            s.Dims[1].Computed[0].Expr = "x; DROP TABLE t"; Check(s.Validate().Count > 0, "inyeccion");
+            s = Sample(); s.Dims[1].Computed.Add(new ComputedSpec { Name = "Marca", Expr = "LEFT(Modelo, 1)" }); Check(Has(s.Validate(), "repite un nombre"), "nombre repetido");
+            s = Sample(); s.Dims[1].Computed.Add(new ComputedSpec { Name = "Fecha_Creacion", Expr = "LEFT(Modelo, 1)" }); Check(Has(s.Validate(), "reservado"), "reservado");
+        });
+
+        // ---------------- origen ----------------
+        Test("origen: motor, vista previa y textos", () =>
+        {
+            Check(DwSpec.PreviewSql("Databricks", "SELECT 1 AS a", 20) == "SELECT * FROM (SELECT 1 AS a) AS q LIMIT 20", "LIMIT");
+            Check(DwSpec.PreviewSql("PostgreSQL", "SELECT 1 AS a", 5).EndsWith("LIMIT 5"), "postgres");
+            Check(DwSpec.PreviewSql("SqlServer", "SELECT 1 AS a", 5) == "SELECT TOP 5 * FROM (SELECT 1 AS a) AS q", "TOP");
+            var s = Sample(); Check(s.SourceKind == "Databricks" && s.SourceLabel.Contains("Databricks"), "por defecto");
+            s.SourceKind = "PostgreSQL"; Check(s.Validate().Count == 0 && s.SourceLabel.Contains("PostgreSQL"), "postgres valido");
+            s.SourceKind = "Oracle"; Check(Has(s.Validate(), "SourceKind"), "desconocido");
+            Check(DwSpec.FromJson(Sample().ToJson()).SourceKind == "Databricks", "ida y vuelta");
+        });
+        Test("las opciones nuevas sobreviven a JSON y la marca de agua no se guarda", () =>
+        {
+            var s = Sample(); s.LoadMode = "Incremental"; s.RejectPolicy = "Reject"; s.NullPolicy = "Unknown"; s.Watermark = new DateTime(2024, 1, 1);
+            s.Dims[1].Computed.Add(new ComputedSpec { Name = "Ini", Expr = "LEFT(Marca, 1)" });
+            var j = s.ToJson(); var b = DwSpec.FromJson(j);
+            Check(b.IsIncremental && b.RejectsRows && b.UsesUnknownMember && b.Dims[1].Computed.Count == 1, "opciones");
+            Check(!j.Contains("Watermark") && !b.Watermark.HasValue, "la marca de agua es de ejecucion");
         });
 
         Console.WriteLine();

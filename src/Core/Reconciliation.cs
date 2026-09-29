@@ -47,6 +47,7 @@ namespace EtlStudio.Core
     public static class Reconciliation
     {
         public const string Explain = "Compara el origen con el DW: filas, llaves de negocio distintas, fecha minima y maxima, y la suma de cada medida. " +
+                                      "Ademas compara cada anio-mes (filas y sumas), porque los totales pueden cuadrar aunque haya errores que se compensan. " +
                                       "Cualquier diferencia significa que se perdieron o alteraron datos en la carga.";
 
         /// <summary>Columnas del origen que el modelo exige NOT NULL (llave de negocio, fecha, dimensiones y medidas).</summary>
@@ -84,6 +85,16 @@ namespace EtlStudio.Core
                 "MAX(t.Fecha) AS max_date"
             };
             foreach (var m in f.Measures) p.Add("SUM(CAST(f." + m.Dst + " AS DECIMAL(38,6))) AS sum_" + m.Src);
+            if (s.RejectsRows)
+            {
+                // lo rechazado tambien cuenta: origen = cargado + rechazado
+                string r = "dbo." + DwSpec.RejectTableName;
+                p.Add("(SELECT COUNT_BIG(*) FROM " + r + ") AS rej_rows");
+                p.Add("(SELECT COUNT(DISTINCT s_" + f.BusinessKey.Src + ") FROM " + r + ") AS rej_bk");
+                p.Add("(SELECT MIN(CAST(CAST(SK_Tiempo AS VARCHAR(8)) AS DATE)) FROM " + r + ") AS rej_min_date");
+                p.Add("(SELECT MAX(CAST(CAST(SK_Tiempo AS VARCHAR(8)) AS DATE)) FROM " + r + ") AS rej_max_date");
+                foreach (var m in f.Measures) p.Add("(SELECT SUM(CAST(s_" + m.Src + " AS DECIMAL(38,6))) FROM " + r + ") AS rej_sum_" + m.Src);
+            }
             return "SELECT " + string.Join(",\n       ", p) + "\nFROM dbo." + f.Name + " f\nJOIN dbo." + s.Time.Name + " t ON t.SK_Tiempo = f.SK_Tiempo";
         }
 
@@ -131,7 +142,7 @@ namespace EtlStudio.Core
                 if (n > 0) errs.Add("La columna '" + c + "' tiene " + n.ToString("N0", CultureInfo.InvariantCulture) + " valores nulos y el modelo la exige NOT NULL (corrige el origen o filtralos en el SELECT).");
             }
             DateTime from, to;
-            if (DateTime.TryParseExact(s.Time.From, DwSpec.DateFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out from) &&
+            if (!s.RejectsRows && DateTime.TryParseExact(s.Time.From, DwSpec.DateFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out from) &&
                 DateTime.TryParseExact(s.Time.To, DwSpec.DateFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out to))
             {
                 var min = ToDate(Get(src, "min_date")); var max = ToDate(Get(src, "max_date"));
@@ -147,16 +158,19 @@ namespace EtlStudio.Core
             var r = new ReconResult { Sql = SourceSql(s) + "\n\n" + DestSql(s) };
             Action<string, string, string, bool> add = (m, a, b, ok) => r.Lines.Add(new ReconLine { Metric = m, Source = a, Dest = b, Status = ok ? "OK" : "DIFERENCIA" });
 
+            long rr = ToLong(Get(dst, "rej_rows")), rbk = ToLong(Get(dst, "rej_bk"));
             long sr = ToLong(Get(src, "n_rows")), dr = ToLong(Get(dst, "n_rows"));
-            add("Filas de " + s.Fact.Name, sr.ToString("N0", CultureInfo.InvariantCulture), dr.ToString("N0", CultureInfo.InvariantCulture), sr == dr);
+            add("Filas de " + s.Fact.Name + (rr > 0 ? " (cargadas + rechazadas)" : ""), sr.ToString("N0", CultureInfo.InvariantCulture), (dr + rr).ToString("N0", CultureInfo.InvariantCulture), sr == dr + rr);
+            if (rr > 0)
+                r.Lines.Add(new ReconLine { Metric = "Filas rechazadas (revisa dbo." + DwSpec.RejectTableName + ")", Source = "-", Dest = rr.ToString("N0", CultureInfo.InvariantCulture), Status = "AVISO" });
 
-            long sb = ToLong(Get(src, "n_bk")), db = ToLong(Get(dst, "n_bk"));
+            long sb = ToLong(Get(src, "n_bk")), db = ToLong(Get(dst, "n_bk")) + rbk;
             add("Llaves de negocio distintas (" + s.Fact.BusinessKey.Dst + ")", sb.ToString("N0", CultureInfo.InvariantCulture), db.ToString("N0", CultureInfo.InvariantCulture), sb == db);
             if (sb < sr)
                 r.Lines.Add(new ReconLine { Metric = "Llaves de negocio repetidas en el origen", Source = (sr - sb).ToString("N0", CultureInfo.InvariantCulture), Dest = "-", Status = "AVISO" });
 
-            var smin = ToDate(Get(src, "min_date")); var dmin = ToDate(Get(dst, "min_date"));
-            var smax = ToDate(Get(src, "max_date")); var dmax = ToDate(Get(dst, "max_date"));
+            var smin = ToDate(Get(src, "min_date")); var dmin = Earlier(ToDate(Get(dst, "min_date")), ToDate(Get(dst, "rej_min_date")));
+            var smax = ToDate(Get(src, "max_date")); var dmax = Later(ToDate(Get(dst, "max_date")), ToDate(Get(dst, "rej_max_date")));
             add("Fecha minima (" + s.Fact.DateColumn + ")", Day(smin), Day(dmin), smin == dmin);
             add("Fecha maxima (" + s.Fact.DateColumn + ")", Day(smax), Day(dmax), smax == dmax);
 
@@ -164,10 +178,70 @@ namespace EtlStudio.Core
             decimal tol = 0.005m * Math.Max(sr, dr) + 0.01m;
             foreach (var m in s.Fact.Measures)
             {
-                decimal a = ToDec(Get(src, "sum_" + m.Src)), b = ToDec(Get(dst, "sum_" + m.Src));
+                decimal a = ToDec(Get(src, "sum_" + m.Src)), b = ToDec(Get(dst, "sum_" + m.Src)) + ToDec(Get(dst, "rej_sum_" + m.Src));
                 add("Suma de " + m.Dst, Num(a), Num(b), Math.Abs(a - b) <= tol);
             }
             return r;
+        }
+
+        static DateTime? Earlier(DateTime? a, DateTime? b) { return !a.HasValue ? b : !b.HasValue ? a : (a.Value < b.Value ? a : b); }
+
+        static DateTime? Later(DateTime? a, DateTime? b) { return !a.HasValue ? b : !b.HasValue ? a : (a.Value > b.Value ? a : b); }
+
+        // ---------------- reconciliacion por periodo ----------------
+        // Los totales pueden cuadrar aunque haya errores que se compensan. Comparar cada anio-mes los delata (YEAR/MONTH existen en Spark SQL y T-SQL).
+
+        public static string PeriodSourceSql(DwSpec s)
+        {
+            string d = "s." + s.Fact.DateColumn;
+            var p = new List<string> { "YEAR(" + d + ") AS p_y", "MONTH(" + d + ") AS p_m", "COUNT(*) AS n_rows" };
+            foreach (var m in s.Fact.Measures) p.Add("SUM(s." + m.Src + ") AS sum_" + m.Src);
+            return "SELECT " + string.Join(", ", p) + "\nFROM (" + s.SourceQuery + ") AS s\nGROUP BY YEAR(" + d + "), MONTH(" + d + ")";
+        }
+
+        public static string PeriodDestSql(DwSpec s)
+        {
+            var f = s.Fact; var cols = new List<string> { "COUNT(*) AS n_rows" }; var outer = new List<string> { "p_y", "p_m", "SUM(n_rows) AS n_rows" };
+            foreach (var m in f.Measures) { cols.Add("SUM(CAST(f." + m.Dst + " AS DECIMAL(38,6))) AS sum_" + m.Src); outer.Add("SUM(sum_" + m.Src + ") AS sum_" + m.Src); }
+            string inner = "SELECT t.Anio AS p_y, t.Mes AS p_m, " + string.Join(", ", cols) + " FROM dbo." + f.Name + " f JOIN dbo." + s.Time.Name + " t ON t.SK_Tiempo = f.SK_Tiempo GROUP BY t.Anio, t.Mes";
+            if (s.RejectsRows)
+            {
+                var rc = new List<string> { "COUNT(*) AS n_rows" };
+                foreach (var m in f.Measures) rc.Add("SUM(CAST(r.s_" + m.Src + " AS DECIMAL(38,6))) AS sum_" + m.Src);
+                inner += " UNION ALL SELECT r.SK_Tiempo / 10000, (r.SK_Tiempo / 100) % 100, " + string.Join(", ", rc) + " FROM dbo." + DwSpec.RejectTableName + " r GROUP BY r.SK_Tiempo / 10000, (r.SK_Tiempo / 100) % 100";
+            }
+            return "SELECT " + string.Join(", ", outer) + "\nFROM (" + inner + ") u\nGROUP BY p_y, p_m";
+        }
+
+        /// <summary>Compara cada anio-mes (filas y sumas). Devuelve una linea por periodo distinto y una de resumen.</summary>
+        public static List<ReconLine> ComparePeriods(DwSpec s, DataTable src, DataTable dst)
+        {
+            Func<DataTable, Dictionary<string, DataRow>> index = t =>
+            {
+                var d = new Dictionary<string, DataRow>();
+                if (t != null) foreach (DataRow r in t.Rows) d[Convert.ToInt32(r["p_y"], CultureInfo.InvariantCulture) + "-" + Convert.ToInt32(r["p_m"], CultureInfo.InvariantCulture).ToString("00")] = r;
+                return d;
+            };
+            var a = index(src); var b = index(dst); var lines = new List<ReconLine>(); int bad = 0;
+            foreach (var k in a.Keys.Union(b.Keys).OrderBy(x => x, StringComparer.Ordinal))
+            {
+                DataRow ra, rb; a.TryGetValue(k, out ra); b.TryGetValue(k, out rb);
+                Func<DataRow, string, object> val = (r, c) => r == null || r[c] == DBNull.Value ? null : r[c];
+                long na = ToLong(val(ra, "n_rows")), nb = ToLong(val(rb, "n_rows"));
+                var diffs = new List<string>();
+                if (na != nb) diffs.Add("filas " + na.ToString("N0", CultureInfo.InvariantCulture) + " vs " + nb.ToString("N0", CultureInfo.InvariantCulture));
+                decimal tol = 0.005m * Math.Max(na, nb) + 0.01m;
+                foreach (var m in s.Fact.Measures)
+                {
+                    decimal x = ToDec(val(ra, "sum_" + m.Src)), y = ToDec(val(rb, "sum_" + m.Src));
+                    if (Math.Abs(x - y) > tol) diffs.Add(m.Dst + " " + Num(x) + " vs " + Num(y));
+                }
+                if (diffs.Count == 0) continue;
+                if (++bad <= 20) lines.Add(new ReconLine { Metric = "Periodo " + k, Source = string.Join("; ", diffs), Dest = "(origen vs destino)", Status = "DIFERENCIA" });
+            }
+            if (bad > 20) lines.Add(new ReconLine { Metric = "Otros periodos con diferencias", Source = (bad - 20).ToString(CultureInfo.InvariantCulture), Dest = "-", Status = "DIFERENCIA" });
+            lines.Insert(0, new ReconLine { Metric = "Periodos (anio-mes) comparados", Source = a.Count.ToString(CultureInfo.InvariantCulture), Dest = b.Count.ToString(CultureInfo.InvariantCulture), Status = bad == 0 && a.Count == b.Count ? "OK" : "DIFERENCIA" });
+            return lines;
         }
 
         // ---------------- acceso a datos ----------------
@@ -206,6 +280,12 @@ namespace EtlStudio.Core
         public static ReconResult Run(DwSpec s, IDictionary<string, object> sourceProfile = null)
         {
             var r = Compare(s, sourceProfile ?? ProfileSource(s), ProfileDestination(s));
+            try
+            {
+                r.Lines.AddRange(ComparePeriods(s, SourceReader.Query(s.SourceDsn, PeriodSourceSql(s)), SqlRunner.Query(s.SqlServer, s.DwName, PeriodDestSql(s))));
+                r.Sql += "\n\n" + PeriodSourceSql(s) + "\n\n" + PeriodDestSql(s);
+            }
+            catch (Exception ex) { r.Lines.Add(new ReconLine { Metric = "No se pudo comparar por periodo", Source = ex.Message.Replace('\n', ' '), Dest = "-", Status = "AVISO" }); }
             if (s.Goals != null) r.Lines.AddRange(GoalsLines(s));
             return r;
         }

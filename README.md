@@ -37,6 +37,11 @@ El paquete generado sigue el patron del curso: `SQL_Auditoria_Inicio` -> `SQL_Pr
 - `NaturalKey` (por dimension): columnas del origen que identifican un miembro; el Lookup busca solo por ellas.
 - `NullPolicy` (`Fail` | `Unknown`): que hacer con un nulo en una columna de dimension.
 - Tipos `VARCHAR(n)` o `NVARCHAR(n)` (Unicode) en dimensiones y llave de negocio.
+- `RejectPolicy` (`Fail` | `Reject`): con `Reject`, las filas sin dimension o con fecha fuera de `Dim_Tiempo` se guardan en `dbo.ETL_Rechazos` y se carga el resto.
+- `LoadMode` (`Full` | `Incremental`): la carga incremental lee solo lo posterior a la ultima fecha cargada.
+- `Computed` (por dimension): atributos derivados persistidos, por ejemplo `{"Name":"Inicial","Expr":"UPPER(LEFT(Marca, 1))"}`.
+- `SourceKind`: `Databricks` | `PostgreSQL` | `SqlServer` | `Generic`.
+Ejemplo con todo: `samples/autos_incremental.json`.
 
 ### Comandos
 

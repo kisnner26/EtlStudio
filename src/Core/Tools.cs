@@ -73,12 +73,12 @@ namespace EtlStudio.Core
         }
 
         /// <summary>Ejecuta el SELECT y devuelve maximo 'top' filas para vista previa y esquema.</summary>
-        public static DataTable Preview(string dsn, string query, int top)
+        public static DataTable Preview(string dsn, string query, int top, string kind = "Databricks")
         {
             using (var c = new OdbcConnection(Conn(dsn)))
             {
                 c.Open();
-                var cmd = new OdbcCommand("SELECT * FROM (" + query + ") AS q LIMIT " + top, c) { CommandTimeout = 120 };
+                var cmd = new OdbcCommand(DwSpec.PreviewSql(kind, query, top), c) { CommandTimeout = 120 };
                 var dt = new DataTable();
                 using (var rd = cmd.ExecuteReader()) dt.Load(rd);
                 return dt;

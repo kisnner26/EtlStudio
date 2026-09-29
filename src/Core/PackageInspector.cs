@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Xml.Linq;
@@ -61,7 +61,7 @@ namespace EtlStudio.Core
         /// <summary>Tareas que debe contener el paquete, en orden, segun el diseno.</summary>
         public static List<string> ExpectedOrder(DwSpec s)
         {
-            var l = new List<string> { "SQL_Auditoria_Inicio", "SQL_Preparar_Staging", "DFT_Poblar_Dimensiones", "DFT_Extraer_Origen" };
+            var l = new List<string> { "SQL_Auditoria_Inicio", "SQL_Preparar_Staging", "DFT_Poblar_Dimensiones", "SQL_Fusionar_Dimensiones", "DFT_Extraer_Origen" };
             if (s.Goals != null) l.Add("DFT_Cargar_Metas_Excel");
             l.Add("SQL_Publicar"); l.Add("SQL_Auditoria_Fin");
             return l;
@@ -74,7 +74,7 @@ namespace EtlStudio.Core
             if (p.ProtectionLevel != "0") e.Add("ProtectionLevel deberia ser 0 (DontSaveSensitive) y es '" + p.ProtectionLevel + "'");
             var exp = ExpectedOrder(s);
             if (!p.TaskOrder.SequenceEqual(exp)) e.Add("Orden de tareas inesperado. Esperado: " + string.Join(" -> ", exp) + ". Encontrado: " + string.Join(" -> ", p.TaskOrder));
-            foreach (var d in s.Dims)
+            foreach (var d in s.Dims.Where(x => !s.RejectsRows))   // con Reject no hay lookups: el cruce se hace al publicar
             {
                 string key = "DFT_Extraer_Origen|LK_" + d.Name.Replace("Dim_", "");
                 string v; if (!p.LookupBehavior.TryGetValue(key, out v)) e.Add("Falta el lookup de " + d.Name + " en DFT_Extraer_Origen");

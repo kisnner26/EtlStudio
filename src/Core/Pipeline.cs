@@ -89,7 +89,14 @@ namespace EtlStudio.Core
                 if (recreate) SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.DropDatabase(s));
                 SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.CreateDatabase(s));
                 SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.Tables(s));
-                SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.StagingPrepare(s));   // el paquete escribe en stg; SSIS necesita que existan para leer su metadata
+                SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.StagingPrepare(s));
+                if (s.IsIncremental)
+                {
+                    // Carga incremental: se leen solo las filas con fecha >= la ultima cargada. Sin datos previos, se hace una carga completa.
+                    var w = SqlRunner.Query(s.SqlServer, s.DwName, "SELECT MAX(t.Fecha) AS w FROM dbo." + s.Fact.Name + " f JOIN dbo." + s.Time.Name + " t ON t.SK_Tiempo = f.SK_Tiempo");
+                    s.Watermark = w.Rows.Count > 0 && w.Rows[0][0] != DBNull.Value ? (DateTime?)Convert.ToDateTime(w.Rows[0][0]).Date : null;
+                    log(s.Watermark.HasValue ? "Carga incremental desde " + s.Watermark.Value.ToString(DwSpec.DateFormat) + " (marca de agua)." : "Carga incremental sin datos previos: se carga todo el origen.");
+                }   // el paquete escribe en stg; SSIS necesita que existan para leer su metadata
                 log("Base '" + s.DwName + "' y tablas listas en " + s.SqlServer + ".");
             });
 
@@ -132,7 +139,7 @@ namespace EtlStudio.Core
 
         static void Dtx(string pkg, bool validate, Action<string> log)
         {
-            int code = DtExec.Run(pkg, validate, l => { if (l.Contains("Error") || l.Contains("DTSER") || l.Contains("Elapsed")) log(l.Trim()); });
+            int code = DtExec.Run(pkg, validate, l => { AppLog.Info("dtexec: " + l.Trim()); if (l.Contains("Error") || l.Contains("DTSER") || l.Contains("Elapsed")) log(l.Trim()); });
             if (code != 0) throw new Exception("dtexec devolvio el codigo " + code + " (" + (validate ? "validacion" : "carga") + ").");
         }
 
@@ -145,16 +152,17 @@ namespace EtlStudio.Core
             d.Para(res.ReconciliationOk ? "Reconciliacion origen vs destino: los datos cargados coinciden con el origen." : "Reconciliacion origen vs destino: NO COINCIDEN, revisa la seccion Verificacion.", true);
             d.Heading("Arquitectura");
             d.Bullet("Base de datos: " + s.DwName + " en " + s.SqlServer);
-            d.Bullet("Origen: DSN " + s.SourceDsn + " (Databricks via ODBC)");
+            d.Bullet("Origen: DSN " + s.SourceDsn + " (" + s.SourceLabel + ")");
             d.Bullet("Dimension de tiempo: " + s.Time.Name + " (" + s.Time.From + " a " + s.Time.To + ")");
             foreach (var dim in s.Dims) d.Bullet("Dimension " + dim.Name + " (" + dim.Key + "): " + string.Join(", ", dim.Columns.Select(c => c.Dst)));
             d.Bullet("Tabla de hechos " + s.Fact.Name + ": " + string.Join(", ", s.Fact.Measures.Select(m => m.Dst)));
             if (s.Goals != null) d.Bullet("Metas desde Excel: " + s.Goals.Table);
             d.Heading("Consulta de origen").Code(s.SourceQuery);
             d.Heading("Paquete SSIS").Para(res.PackagePath);
-            d.Bullet("SQL_Auditoria_Inicio  →  SQL_Preparar_Staging  →  DFT_Poblar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel  " : "") + "→  SQL_Publicar  →  SQL_Auditoria_Fin");
+            d.Bullet("SQL_Auditoria_Inicio  →  SQL_Preparar_Staging  →  DFT_Poblar_Dimensiones  →  SQL_Fusionar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel  " : "") + "→  SQL_Publicar  →  SQL_Auditoria_Fin");
             d.Bullet("La carga escribe en tablas de paso (esquema stg) y SQL_Publicar las pasa al destino en una sola transaccion: si algo falla, el DW queda como estaba.");
             d.Bullet("Conversion de datos a DT_STR (DT_WSTR en NVARCHAR), Lookups por dimension (una llave sin dimension detiene la carga), columna derivada SK_Tiempo y carga rapida.");
+            d.Bullet("Modo de carga: " + (s.IsIncremental ? "incremental (solo filas nuevas; marca de agua " + (s.Watermark.HasValue ? s.Watermark.Value.ToString(DwSpec.DateFormat) : "sin datos previos") + ")" : "completa") + ". Filas sin dimension: " + (s.RejectsRows ? "se rechazan a dbo." + DwSpec.RejectTableName + " y se cargan las demas." : "detienen la carga."));
             if (s.UsesUnknownMember) d.Bullet("Politica de nulos: un nulo en una columna de dimension se carga como '" + DwSpec.UnknownMember + "'.");
             d.Bullet("Cada corrida queda registrada en dbo." + DwSpec.AuditTableName + " (EnCurso, OK o Fallido).");
             d.Heading("Verificacion");

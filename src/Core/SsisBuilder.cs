@@ -49,6 +49,7 @@ namespace EtlStudio.Core
             steps.Add(ExecSql("SQL_Auditoria_Inicio", DdlGenerator.AuditStart(spec)));
             steps.Add(ExecSql("SQL_Preparar_Staging", DdlGenerator.StagingPrepare(spec)));   // la carga escribe en stg; dbo no se toca hasta publicar
             steps.Add(BuildDimensionsFlow());
+            steps.Add(ExecSql("SQL_Fusionar_Dimensiones", DdlGenerator.MergeDimensions(spec)));   // agrega a stg.Dim_* solo los miembros nuevos
             steps.Add(BuildFactFlow());
             if (spec.Goals != null)
             {
@@ -80,7 +81,7 @@ namespace EtlStudio.Core
                 Comp cv = DataConv(p, "Conversion de datos" + suf, FirstOut(src), conv.ToArray());
                 var map = new Dictionary<string, string>();
                 foreach (var c in d.Columns) map["Copy of " + c.Src] = c.Dst;
-                OleDest(p, "Destino " + d.Name, FirstOut(cv), Stg(d.Name), map, null);
+                OleDest(p, "Destino " + d.Name, FirstOut(cv), Stg(d.Name + "_Nuevos"), map, null);
             }
             return th;
         }
@@ -96,21 +97,30 @@ namespace EtlStudio.Core
             Comp last = DataConv(p, "Conversion de datos", FirstOut(src), conv.ToArray());
 
             IDTSOutput100 outp = FirstOut(last);
-            foreach (var d in spec.Dims)
-            {
-                var lc = d.LookupColumns();   // la llave natural si se definio (mas robusto ante mayusculas, acentos o collation); si no, todas las columnas
-                Comp lk = Look(p, "LK_" + d.Name.Replace("Dim_", ""), outp, Stg(d.Name),
-                    lc.Select(c => "Copy of " + c.Src).ToArray(), lc.Select(c => c.Dst).ToArray(), new[] { d.Key }, true);
-                outp = MatchOut(lk);
-            }
+            if (!spec.RejectsRows)
+                foreach (var d in spec.Dims)
+                {
+                    var lc = d.LookupColumns();   // la llave natural si se definio (mas robusto ante mayusculas, acentos o collation); si no, todas las columnas
+                    Comp lk = Look(p, "LK_" + d.Name.Replace("Dim_", ""), outp, Stg(d.Name),
+                        lc.Select(c => "Copy of " + c.Src).ToArray(), lc.Select(c => c.Dst).ToArray(), new[] { d.Key }, true);
+                    outp = MatchOut(lk);
+                }
+            // Con RejectPolicy 'Reject' no hay Lookups en el flujo: la Fact se aterriza cruda en stg y SQL_Publicar la cruza con las dimensiones.
             string dateCol = spec.Fact.DateColumn;
             Comp dt = Derive(p, "DC_SK_Tiempo", outp, "SK_Tiempo",
                 "(DT_I4)(YEAR((DT_DBTIMESTAMP)" + dateCol + ") * 10000 + MONTH((DT_DBTIMESTAMP)" + dateCol + ") * 100 + DAY((DT_DBTIMESTAMP)" + dateCol + "))", dateCol);
 
             var map = new Dictionary<string, string> { { "SK_Tiempo", "SK_Tiempo" } };
-            foreach (var d in spec.Dims) map[d.Key] = d.Key;
-            map["Copy of " + bk.Src] = bk.Dst;
-            foreach (var m in spec.Fact.Measures) map[m.Src] = m.Dst;
+            if (spec.RejectsRows)
+            {
+                foreach (var rc in DdlGenerator.RawColumns(spec)) map[rc.IsMeasure ? rc.Map.Src : "Copy of " + rc.Map.Src] = rc.Name;
+            }
+            else
+            {
+                foreach (var d in spec.Dims) map[d.Key] = d.Key;
+                map["Copy of " + bk.Src] = bk.Dst;
+                foreach (var m in spec.Fact.Measures) map[m.Src] = m.Dst;
+            }
             OleDest(p, "Destino " + spec.Fact.Name, FirstOut(dt), Stg(spec.Fact.Name), map, "TABLOCK,CHECK_CONSTRAINTS");
             return th;
         }

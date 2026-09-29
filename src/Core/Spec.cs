@@ -22,6 +22,8 @@ namespace EtlStudio.Core
         public List<ColumnMap> Columns { get; set; } = new List<ColumnMap>();
         /// <summary>Columnas (origen) que identifican de forma unica un miembro. Vacio = todas las columnas.</summary>
         public List<string> NaturalKey { get; set; } = new List<string>();
+        /// <summary>Atributos derivados de la dimension (por ejemplo un rango). La expresion usa solo las columnas de la dimension.</summary>
+        public List<ComputedSpec> Computed { get; set; } = new List<ComputedSpec>();
 
         /// <summary>Columnas por las que el Lookup de la Fact busca la dimension: la llave natural, o todas si no se definio.</summary>
         public List<ColumnMap> LookupColumns()
@@ -80,6 +82,40 @@ namespace EtlStudio.Core
         public GoalsSpec Goals { get; set; }
         /// <summary>Que hacer con un nulo en una columna de dimension: "Fail" (detiene la carga) o "Unknown" (lo carga como 'Desconocido').</summary>
         public string NullPolicy { get; set; } = "Fail";
+        /// <summary>"Full" (vacia y recarga) o "Incremental" (solo filas con fecha >= la ultima cargada; agrega miembros nuevos a las dimensiones).</summary>
+        public string LoadMode { get; set; } = "Full";
+        /// <summary>Una fila sin dimension (o con fecha fuera de Dim_Tiempo): "Fail" detiene la carga; "Reject" carga lo valido y guarda el resto en dbo.ETL_Rechazos.</summary>
+        public string RejectPolicy { get; set; } = "Fail";
+        /// <summary>Motor del origen: Databricks | PostgreSQL | SqlServer | Generic. Solo afecta a la vista previa y a los textos.</summary>
+        public string SourceKind { get; set; } = "Databricks";
+        /// <summary>Ultima fecha ya cargada (la fija el Pipeline en cargas incrementales; no forma parte del diseno).</summary>
+        [System.Web.Script.Serialization.ScriptIgnore] public DateTime? Watermark { get; set; }
+
+        public bool IsIncremental { get { return string.Equals(LoadMode, "Incremental", StringComparison.OrdinalIgnoreCase); } }
+        public bool RejectsRows { get { return string.Equals(RejectPolicy, "Reject", StringComparison.OrdinalIgnoreCase); } }
+        public const string RejectTableName = "ETL_Rechazos";
+        public static readonly string[] SourceKinds = { "Databricks", "PostgreSQL", "SqlServer", "Generic" };
+
+        /// <summary>Consulta de vista previa segun el motor del origen.</summary>
+        public static string PreviewSql(string kind, string query, int top)
+        {
+            if (string.Equals(kind, "SqlServer", StringComparison.OrdinalIgnoreCase)) return "SELECT TOP " + top + " * FROM (" + query + ") AS q";
+            return "SELECT * FROM (" + query + ") AS q LIMIT " + top;
+        }
+
+        public string SourceLabel
+        {
+            get
+            {
+                switch ((SourceKind ?? "").ToLowerInvariant())
+                {
+                    case "postgresql": return "PostgreSQL via ODBC";
+                    case "sqlserver": return "SQL Server via ODBC";
+                    case "generic": return "ODBC";
+                    default: return "Databricks via ODBC";
+                }
+            }
+        }
 
         public const string UnknownMember = "Desconocido";
         public bool UsesUnknownMember { get { return string.Equals(NullPolicy, "Unknown", StringComparison.OrdinalIgnoreCase); } }
@@ -196,6 +232,10 @@ namespace EtlStudio.Core
 
             if (!string.Equals(NullPolicy ?? "Fail", "Fail", StringComparison.OrdinalIgnoreCase) && !UsesUnknownMember) e.Add("NullPolicy debe ser 'Fail' o 'Unknown': '" + NullPolicy + "'");
 
+            if (!SourceKinds.Contains(SourceKind ?? "", StringComparer.OrdinalIgnoreCase)) e.Add("SourceKind debe ser " + string.Join(", ", SourceKinds) + ": '" + SourceKind + "'");
+            if (!IsIncremental && !string.Equals(LoadMode ?? "Full", "Full", StringComparison.OrdinalIgnoreCase)) e.Add("LoadMode debe ser 'Full' o 'Incremental': '" + LoadMode + "'");
+            if (!RejectsRows && !string.Equals(RejectPolicy ?? "Fail", "Fail", StringComparison.OrdinalIgnoreCase)) e.Add("RejectPolicy debe ser 'Fail' o 'Reject': '" + RejectPolicy + "'");
+
             var tables = new List<string>();
             if (Time != null) tables.Add(Time.Name);
             if (Dims == null || Dims.Count == 0) e.Add("Debe haber al menos una dimension");
@@ -216,6 +256,14 @@ namespace EtlStudio.Core
                     if (UsesUnknownMember)
                         foreach (var c in d.Columns.Where(c => c != null && c.Type != null && TypeBounds(c.Type)))
                             if (IsText(c.Type) && VarcharLen(c.Type) < UnknownMember.Length) e.Add("NullPolicy 'Unknown' necesita al menos " + UnknownMember.Length + " caracteres en " + d.Name + "." + c.Dst);
+                    if (d.Computed != null) foreach (var c in d.Computed)
+                    {
+                        if (c == null) continue;
+                        id(c.Name, "Dim " + d.Name + " Computed.Name");
+                        if (c.Name != null && (Reserved.Contains(c.Name) || d.Columns.Any(x => x != null && string.Equals(x.Dst, c.Name, StringComparison.OrdinalIgnoreCase)) || string.Equals(c.Name, d.Key, StringComparison.OrdinalIgnoreCase)))
+                            e.Add("El atributo derivado '" + c.Name + "' de " + d.Name + " repite un nombre de la dimension o esta reservado");
+                        foreach (var p in DimExprProblems(c, d)) e.Add(p);
+                    }
                     if (d.HasNaturalKey)
                     {
                         foreach (var k in d.NaturalKey.Where(k => !d.Columns.Any(c => c != null && string.Equals(c.Src, k, StringComparison.OrdinalIgnoreCase))))
@@ -280,8 +328,34 @@ namespace EtlStudio.Core
                     else if (!ExcelName.IsMatch(c)) e.Add("Columna de Excel con caracteres no permitidos: '" + c + "'");
             }
 
+            if (RejectsRows && Fact != null && Fact.Measures != null && Dims != null && Fact.BusinessKey != null)
+                foreach (var m in Fact.Measures.Where(m => m != null && m.Src != null && (m.Src.Equals(Fact.BusinessKey.Src, StringComparison.OrdinalIgnoreCase) || Dims.Any(d => d.Columns != null && d.Columns.Any(c => c != null && string.Equals(c.Src, m.Src, StringComparison.OrdinalIgnoreCase))))))
+                    e.Add("Con RejectPolicy 'Reject' la medida '" + m.Src + "' no puede ser tambien una columna de dimension o la llave de negocio");
+            if (Dims != null) unique(tables.Concat(Dims.Where(d => d != null).Select(d => d.Name + "_Nuevos")), "las tablas de paso (stg)");
             tables.Add(AuditTableName);
+            if (RejectsRows) tables.Add(RejectTableName);
             unique(tables, "las tablas del DW");
+            return e;
+        }
+
+        static readonly HashSet<string> DimExprWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "LEFT", "RIGHT", "UPPER", "LOWER", "LTRIM", "RTRIM", "SUBSTRING", "LEN", "REPLACE", "ISNULL", "COALESCE", "NULLIF", "ABS", "ROUND",
+            "CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "NOT", "IS", "NULL", "LIKE", "IN"
+        };
+        static readonly Regex DimExprSafe = new Regex(@"^[A-Za-z0-9_ ()+\-*/.,<>=%']+$");
+
+        /// <summary>Problemas de la expresion de un atributo derivado de dimension (vacio = valida).</summary>
+        static List<string> DimExprProblems(ComputedSpec c, DimSpec d)
+        {
+            var e = new List<string>();
+            if (string.IsNullOrWhiteSpace(c.Expr) || !DimExprSafe.IsMatch(c.Expr)) { e.Add("Expresion no permitida en el atributo " + c.Name + " de " + d.Name); return e; }
+            if (c.Expr.Count(ch => ch == '\'') % 2 != 0) { e.Add("Comillas sin cerrar en el atributo " + c.Name + " de " + d.Name); return e; }
+            var noLiterals = Regex.Replace(c.Expr, "'[^']*'", " ");
+            var cols = new HashSet<string>(d.Columns.Where(x => x != null && x.Dst != null).Select(x => x.Dst), StringComparer.OrdinalIgnoreCase);
+            foreach (Match t in ExprToken.Matches(noLiterals))
+                if (!cols.Contains(t.Value) && !DimExprWords.Contains(t.Value))
+                    e.Add("El atributo " + c.Name + " de " + d.Name + " usa '" + t.Value + "', que no es una columna de la dimension ni una funcion permitida");
             return e;
         }
 
@@ -291,18 +365,26 @@ namespace EtlStudio.Core
 
         /// <summary>
         /// SELECT que leen la carga y la reconciliacion. Con NullPolicy 'Unknown' reemplaza los nulos de las columnas de
-        /// dimension por 'Desconocido'; solo devuelve las columnas que el modelo usa.
+        /// dimension por 'Desconocido' (y solo devuelve las columnas que el modelo usa). En una carga incremental con marca
+        /// de agua filtra las filas con fecha >= la ultima cargada (>= y no >: las filas tardias del mismo dia no se pierden;
+        /// las repetidas se descartan al publicar por su llave de negocio). CAST(... AS DATE) es portable entre motores.
         /// </summary>
         public string EffectiveSource()
         {
-            if (!UsesUnknownMember) return SourceQuery;
-            var dimCols = new HashSet<string>(Dims.SelectMany(d => d.Columns.Select(c => c.Src)), StringComparer.OrdinalIgnoreCase);
-            var cols = new List<string> { Fact.BusinessKey.Src, Fact.DateColumn };
-            cols.AddRange(Dims.SelectMany(d => d.Columns.Select(c => c.Src)));
-            cols.AddRange(Fact.Measures.Select(m => m.Src));
-            var sel = cols.Distinct(StringComparer.OrdinalIgnoreCase)
-                .Select(c => dimCols.Contains(c) ? "COALESCE(q." + c + ", '" + UnknownMember + "') AS " + c : "q." + c);
-            return "SELECT " + string.Join(", ", sel) + " FROM (" + SourceQuery + ") AS q";
+            bool unknown = UsesUnknownMember, incr = IsIncremental && Watermark.HasValue;
+            if (!unknown && !incr) return SourceQuery;
+            string sel = "*";
+            if (unknown)
+            {
+                var dimCols = new HashSet<string>(Dims.SelectMany(d => d.Columns.Select(c => c.Src)), StringComparer.OrdinalIgnoreCase);
+                var cols = new List<string> { Fact.BusinessKey.Src, Fact.DateColumn };
+                cols.AddRange(Dims.SelectMany(d => d.Columns.Select(c => c.Src)));
+                cols.AddRange(Fact.Measures.Select(m => m.Src));
+                sel = string.Join(", ", cols.Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Select(c => dimCols.Contains(c) ? "COALESCE(q." + c + ", '" + UnknownMember + "') AS " + c : "q." + c));
+            }
+            return "SELECT " + sel + " FROM (" + SourceQuery + ") AS q" +
+                   (incr ? " WHERE q." + Fact.DateColumn + " >= CAST('" + Watermark.Value.ToString(DateFormat, CultureInfo.InvariantCulture) + "' AS DATE)" : "");
         }
 
         public static int VarcharLen(string type)

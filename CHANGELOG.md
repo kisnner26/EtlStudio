@@ -1,5 +1,18 @@
 # Cambios
 
+## 1.4.0
+
+- **Rechazos** (`RejectPolicy`: `Fail` | `Reject`): con `Reject`, una fila sin dimension o con fecha fuera de `Dim_Tiempo` no detiene la carga; se guarda con su motivo en `dbo.ETL_Rechazos` y se carga el resto. La Fact se aterriza cruda en `stg` y `SQL_Publicar` la cruza con las dimensiones (sin multiplicar filas si la llave no es unica). La reconciliacion cuenta cargadas + rechazadas y avisa.
+- **Carga incremental** (`LoadMode`: `Full` | `Incremental`): lee solo las filas con fecha >= la ultima cargada (marca de agua calculada por el `Pipeline`), agrega miembros nuevos a las dimensiones conservando sus llaves y no vuelve a cargar hechos ya existentes (por llave de negocio). Nuevo paso `SQL_Fusionar_Dimensiones` y tablas de aterrizaje `stg.<Dim>_Nuevos`.
+- **Atributos derivados en dimensiones** (`Computed` en cada dimension): columnas persistidas con una expresion sobre las columnas de la dimension (funciones de texto y `CASE`, sin subconsultas).
+- **Reconciliacion por periodo**: ademas de los totales, compara filas y sumas por anio-mes (detecta errores que se compensan).
+- **Origen configurable** (`SourceKind`: Databricks, PostgreSQL, SqlServer, Generic) para la vista previa y los textos del reporte.
+- Todas las lineas de `dtexec` quedan en el registro de la aplicacion.
+- `samples/autos_incremental.json` usa todas las opciones. Pruebas: 184 comprobaciones.
+
+**Sin verificar en Windows**: igual que 1.3.0, el generador SSIS (nuevo paso, aterrizaje de dimensiones y Fact cruda) no se ejecuto. El SQL de publicacion, fusion y reconciliacion esta probado solo como texto, **no contra un SQL Server**.
+
+**Compatibilidad**: el paquete agrega `SQL_Fusionar_Dimensiones` y las dimensiones se cargan en `stg.<Dim>_Nuevos`; regenera los `.dtsx`.
 ## 1.3.0
 
 Carga que no destruye el DW, datos reales sucios y operacion.
