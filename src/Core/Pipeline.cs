@@ -103,7 +103,14 @@ namespace EtlStudio.Core
             res.PackagePath = packagePath ?? Path.Combine(outDir, s.DwName + ".dtsx");
             stage("pkg", () => { new SsisBuilder(s).Build(res.PackagePath); log("Paquete: " + res.PackagePath); });
 
-            stage("validate", () => Dtx(res.PackagePath, true, log));
+            stage("validate", () =>
+            {
+                // Prueba de humo propia antes de dtexec: orden de tareas, ProtectionLevel, lookups de la Fact y SK_Tiempo.
+                var problems = PackageInspector.Verify(s, PackageInspector.Read(File.ReadAllText(res.PackagePath)));
+                if (problems.Count > 0) throw new Exception("El paquete generado no cumple lo prometido:\n - " + string.Join("\n - ", problems));
+                log("Paquete conforme (orden de tareas, proteccion, lookups y SK_Tiempo).");
+                Dtx(res.PackagePath, true, log);
+            });
             stage("load", () => Dtx(res.PackagePath, false, log));
 
             // Si la reconciliacion no cuadra, igual se escribe el reporte (con la evidencia) y despues se avisa con una excepcion.

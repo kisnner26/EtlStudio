@@ -36,7 +36,7 @@ namespace EtlStudio.Setup
     public static class Installer
     {
         public const string AppName = "EtlStudio";
-        public const string Version = "1.3.0";
+        public const string Version = "1.4.1";
         const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\EtlStudio";
 
         public static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", AppName); } }

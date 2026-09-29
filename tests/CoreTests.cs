@@ -351,6 +351,13 @@ public static class CoreTests
             var noOrder = PackageInspector.Read(FakePackage(s, "0", "0", true).Replace("SQL_Publicar", "SQL_Otra"));
             Check(Has(PackageInspector.Verify(s, noOrder), "Orden de tareas"), "orden");
         });
+        Test("inspector: lee la expresion de SK_Tiempo tal como la guarda SSIS (funciones entre corchetes)", () =>
+        {
+            var s = Sample();
+            // paquete real (corrida en Windows): solo trae Expression, con [YEAR](...) y #{lineage}
+            var info = PackageInspector.Read(FakePackage(s, "0", "0", false).Replace("<DTS:Executable DTS:ObjectName=\"DFT_Extraer_Origen\">", "<DTS:Executable DTS:ObjectName=\"DFT_Extraer_Origen\"><component name=\"DC_SK_Tiempo\"><properties><property name=\"Expression\">(DT_I4)([YEAR]((DT_DBTIMESTAMP)#{a}) * 10000 + [MONTH]((DT_DBTIMESTAMP)#{a}) * 100 + [DAY]((DT_DBTIMESTAMP)#{a}))</property></properties></component>"));
+            Check(PackageInspector.Verify(s, info).Count == 0, string.Join("; ", PackageInspector.Verify(s, info)));
+        });
         Test("inspector: el lookup de metas puede redirigir, solo los de la Fact deben fallar", () =>
         {
             var s = Sample();

@@ -52,7 +52,9 @@ namespace EtlStudio.Core
                 {
                     var pn = Attr(p, "name");
                     if (pn == "NoMatchBehavior") info.LookupBehavior[flow + "|" + cname] = p.Value.Trim();
-                    if ((pn == "FriendlyExpression" || pn == "Expression") && cname == "DC_SK_Tiempo" && p.Value.Contains("YEAR") && !info.SkTiempoExpr.ContainsKey(flow)) info.SkTiempoExpr[flow] = p.Value;
+                    // SSIS guarda dos versiones: FriendlyExpression (texto tal cual) y Expression (funciones entre corchetes: [YEAR](...) y columnas como #{lineage}).
+                    if ((pn == "FriendlyExpression" || pn == "Expression") && cname == "DC_SK_Tiempo" && p.Value.Contains("YEAR"))
+                        if (pn == "FriendlyExpression" || !info.SkTiempoExpr.ContainsKey(flow)) info.SkTiempoExpr[flow] = p.Value.Replace("[YEAR]", "YEAR").Replace("[MONTH]", "MONTH").Replace("[DAY]", "DAY");
                 }
             }
             return info;

@@ -1,5 +1,15 @@
 # Cambios
 
+## 1.4.1
+
+Correcciones tras la primera corrida real en Windows (`--all --recreate` contra Databricks, 3.000.000 de filas y metas de Excel: exit 0, reconciliacion correcta).
+
+- **Faltaba la referencia `System.Xml.Linq` en `EtlStudio.csproj`** (la usa `PackageInspector`): 1.3.0 y 1.4.0 no compilaban en Windows.
+- **`PackageInspector` daba un falso positivo con un paquete real**: SSIS guarda la expresion de `SK_Tiempo` como `[YEAR](...)` (funciones entre corchetes). Ahora se normaliza y se prefiere `FriendlyExpression`. Probado contra el `.dtsx` real de la corrida.
+- **El `Pipeline` ahora corre esa prueba de humo sobre el paquete que genera**, antes de `dtexec`. Antes solo existia como comando `--inspect`.
+
+Evidencia de la corrida (modo `Full`, `Fail`): staging, fusion de dimensiones, publicacion transaccional, reconciliacion por periodo (29 periodos), y SQL de perfilado contra Databricks. **No se ejercitaron** `Reject`, `Incremental`, `NullPolicy: Unknown`, `NaturalKey`, `NVARCHAR` ni `Computed` en dimensiones.
+
 ## 1.4.0
 
 - **Rechazos** (`RejectPolicy`: `Fail` | `Reject`): con `Reject`, una fila sin dimension o con fecha fuera de `Dim_Tiempo` no detiene la carga; se guarda con su motivo en `dbo.ETL_Rechazos` y se carga el resto. La Fact se aterriza cruda en `stg` y `SQL_Publicar` la cruza con las dimensiones (sin multiplicar filas si la llave no es unica). La reconciliacion cuenta cargadas + rechazadas y avisa.
