@@ -53,7 +53,7 @@ namespace EtlStudio.Core
         public static List<string> NullCheckedColumns(DwSpec s)
         {
             var l = new List<string> { s.Fact.BusinessKey.Src, s.Fact.DateColumn };
-            foreach (var d in s.Dims) l.AddRange(d.Columns.Select(c => c.Src));
+            if (!s.UsesUnknownMember) foreach (var d in s.Dims) l.AddRange(d.Columns.Select(c => c.Src));   // con 'Unknown' un nulo de dimension se carga como 'Desconocido'
             l.AddRange(s.Fact.Measures.Select(m => m.Src));
             return l.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }

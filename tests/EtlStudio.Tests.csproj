@@ -19,6 +19,8 @@
     <Reference Include="System.Data" />
     <Reference Include="System.Security" />
     <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Linq" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="CoreTests.cs" />
@@ -28,6 +30,10 @@
     <Compile Include="..\src\Core\Reconciliation.cs"><Link>Core\Reconciliation.cs</Link></Compile>
     <Compile Include="..\src\Core\Tools.cs"><Link>Core\Tools.cs</Link></Compile>
     <Compile Include="..\src\Core\Plan.cs"><Link>Core\Plan.cs</Link></Compile>
+    <Compile Include="..\src\Core\AppLog.cs"><Link>Core\AppLog.cs</Link></Compile>
+    <Compile Include="..\src\Core\Notifier.cs"><Link>Core\Notifier.cs</Link></Compile>
+    <Compile Include="..\src\Core\PackageInspector.cs"><Link>Core\PackageInspector.cs</Link></Compile>
+    <Compile Include="..\src\Core\Requirements.cs"><Link>Core\Requirements.cs</Link></Compile>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

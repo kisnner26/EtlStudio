@@ -47,7 +47,7 @@ namespace EtlStudio.Core
 
             var steps = new List<TaskHost>();
             steps.Add(ExecSql("SQL_Auditoria_Inicio", DdlGenerator.AuditStart(spec)));
-            steps.Add(ExecSql("SQL_Limpiar_Destino", DdlGenerator.Cleanup(spec)));
+            steps.Add(ExecSql("SQL_Preparar_Staging", DdlGenerator.StagingPrepare(spec)));   // la carga escribe en stg; dbo no se toca hasta publicar
             steps.Add(BuildDimensionsFlow());
             steps.Add(BuildFactFlow());
             if (spec.Goals != null)
@@ -56,6 +56,7 @@ namespace EtlStudio.Core
                 cmXls.ConnectionString = "Provider=Microsoft.ACE.OLEDB.16.0;Data Source=" + spec.Goals.ExcelPath + ";Extended Properties=\"Excel 12.0;HDR=YES\";";
                 steps.Add(BuildGoalsFlow());
             }
+            steps.Add(ExecSql("SQL_Publicar", DdlGenerator.Publish(spec)));   // una transaccion: si falla, el destino queda como estaba
             steps.Add(ExecSql("SQL_Auditoria_Fin", DdlGenerator.AuditEnd(spec)));   // solo se alcanza si todo lo anterior termino bien
             for (int i = 1; i < steps.Count; i++) pkg.PrecedenceConstraints.Add((Executable)steps[i - 1], (Executable)steps[i]);
 
@@ -71,16 +72,15 @@ namespace EtlStudio.Core
             int n = 0;
             foreach (var d in spec.Dims)
             {
-                string cols = string.Join(", ", d.Columns.Select(c => c.Src));
-                string q = "SELECT DISTINCT " + cols + " FROM (" + spec.SourceQuery + ") AS s WHERE " + d.Columns[0].Src + " IS NOT NULL";
+                string q = DimensionQuery(d);
                 string suf = n++ == 0 ? "" : " " + (n - 1);
                 Comp src = AdoSource(p, "Origen de ADO NET" + suf, q);
                 var conv = new List<object>();
-                foreach (var c in d.Columns) { conv.Add(c.Src); conv.Add(ColumnMapLen(c)); }
+                foreach (var c in d.Columns) { conv.Add(c.Src); conv.Add(c); }
                 Comp cv = DataConv(p, "Conversion de datos" + suf, FirstOut(src), conv.ToArray());
                 var map = new Dictionary<string, string>();
                 foreach (var c in d.Columns) map["Copy of " + c.Src] = c.Dst;
-                OleDest(p, "Destino " + d.Name, FirstOut(cv), "[dbo].[" + d.Name + "]", map, null);
+                OleDest(p, "Destino " + d.Name, FirstOut(cv), Stg(d.Name), map, null);
             }
             return th;
         }
@@ -88,18 +88,19 @@ namespace EtlStudio.Core
         TaskHost BuildFactFlow()
         {
             MainPipe p; var th = Flow("DFT_Extraer_Origen", out p);
-            Comp src = AdoSource(p, "Origen de ADO NET", spec.SourceQuery);
+            Comp src = AdoSource(p, "Origen de ADO NET", spec.EffectiveSource());
 
             var conv = new List<object>(); var seen = new HashSet<string>();
-            foreach (var d in spec.Dims) foreach (var c in d.Columns) if (seen.Add(c.Src)) { conv.Add(c.Src); conv.Add(ColumnMapLen(c)); }
-            var bk = spec.Fact.BusinessKey; if (seen.Add(bk.Src)) { conv.Add(bk.Src); conv.Add(ColumnMapLen(bk)); }
+            foreach (var d in spec.Dims) foreach (var c in d.Columns) if (seen.Add(c.Src)) { conv.Add(c.Src); conv.Add(c); }
+            var bk = spec.Fact.BusinessKey; if (seen.Add(bk.Src)) { conv.Add(bk.Src); conv.Add(bk); }
             Comp last = DataConv(p, "Conversion de datos", FirstOut(src), conv.ToArray());
 
             IDTSOutput100 outp = FirstOut(last);
             foreach (var d in spec.Dims)
             {
-                Comp lk = Look(p, "LK_" + d.Name.Replace("Dim_", ""), outp, "[dbo].[" + d.Name + "]",
-                    d.Columns.Select(c => "Copy of " + c.Src).ToArray(), d.Columns.Select(c => c.Dst).ToArray(), new[] { d.Key }, true);
+                var lc = d.LookupColumns();   // la llave natural si se definio (mas robusto ante mayusculas, acentos o collation); si no, todas las columnas
+                Comp lk = Look(p, "LK_" + d.Name.Replace("Dim_", ""), outp, Stg(d.Name),
+                    lc.Select(c => "Copy of " + c.Src).ToArray(), lc.Select(c => c.Dst).ToArray(), new[] { d.Key }, true);
                 outp = MatchOut(lk);
             }
             string dateCol = spec.Fact.DateColumn;
@@ -110,30 +111,42 @@ namespace EtlStudio.Core
             foreach (var d in spec.Dims) map[d.Key] = d.Key;
             map["Copy of " + bk.Src] = bk.Dst;
             foreach (var m in spec.Fact.Measures) map[m.Src] = m.Dst;
-            OleDest(p, "Destino " + spec.Fact.Name, FirstOut(dt), "[dbo].[" + spec.Fact.Name + "]", map, "TABLOCK,CHECK_CONSTRAINTS");
+            OleDest(p, "Destino " + spec.Fact.Name, FirstOut(dt), Stg(spec.Fact.Name), map, "TABLOCK,CHECK_CONSTRAINTS");
             return th;
         }
 
         TaskHost BuildGoalsFlow()
         {
-            var g = spec.Goals; var gd = spec.Dims.First(d => d.Name == g.DimName); var jc = gd.Columns[0];
+            var g = spec.Goals; var gd = spec.Dims.First(d => d.Name == g.DimName); var jc = gd.LookupColumns()[0];
             MainPipe p; var th = Flow("DFT_Cargar_Metas_Excel", out p);
             Comp x = NewComp(p, "Origen de Excel", XlSrc); UseConn(x, cmXls);
             x.Inst.SetComponentProperty("AccessMode", 0); x.Inst.SetComponentProperty("OpenRowset", g.Sheet);
             Refresh(x);
-            Comp cx = DataConv(p, "Conversion de datos", FirstOut(x), g.ExcelDimColumn, ColumnMapLen(jc));
-            Comp lx = Look(p, "LK_" + gd.Name.Replace("Dim_", ""), FirstOut(cx), "[dbo].[" + gd.Name + "]",
+            Comp cx = DataConv(p, "Conversion de datos", FirstOut(x), g.ExcelDimColumn, jc);
+            Comp lx = Look(p, "LK_" + gd.Name.Replace("Dim_", ""), FirstOut(cx), Stg(gd.Name),
                 new[] { "Copy of " + g.ExcelDimColumn }, new[] { jc.Dst }, new[] { gd.Key }, false);
             string f = g.ExcelDateColumn;
             Comp dx = Derive(p, "DC_SK_Tiempo", MatchOut(lx), "SK_Tiempo",
                 "(DT_I4)((DT_WSTR,4)YEAR((DT_DBTIMESTAMP)" + f + ") + RIGHT(\"0\" + (DT_WSTR,2)MONTH((DT_DBTIMESTAMP)" + f + "),2) + \"01\")", f);
-            OleDest(p, "Destino " + g.Table, FirstOut(dx), "[dbo].[" + g.Table + "]",
+            OleDest(p, "Destino " + g.Table, FirstOut(dx), Stg(g.Table),
                 new Dictionary<string, string> { { "SK_Tiempo", "SK_Tiempo" }, { gd.Key, gd.Key }, { g.ExcelMeasureColumn, "Monto_Meta" } },
                 "TABLOCK,CHECK_CONSTRAINTS");
             return th;
         }
 
-        static int ColumnMapLen(ColumnMap c) { return DwSpec.VarcharLen(c.Type); }
+        static string Stg(string table) { return "[" + DdlGenerator.StagingSchema + "].[" + table + "]"; }
+
+        /// <summary>Miembros distintos de una dimension. Con llave natural: una fila por llave (los demas atributos con MAX, portable entre motores).</summary>
+        string DimensionQuery(DimSpec d)
+        {
+            string src = spec.EffectiveSource();
+            if (!d.HasNaturalKey)
+                return "SELECT DISTINCT " + string.Join(", ", d.Columns.Select(c => c.Src)) + " FROM (" + src + ") AS s WHERE " + d.Columns[0].Src + " IS NOT NULL";
+            var nk = d.LookupColumns();
+            var sel = d.Columns.Select(c => nk.Contains(c) ? c.Src : "MAX(" + c.Src + ") AS " + c.Src);
+            return "SELECT " + string.Join(", ", sel) + " FROM (" + src + ") AS s WHERE " + string.Join(" AND ", nk.Select(c => c.Src + " IS NOT NULL")) +
+                   " GROUP BY " + string.Join(", ", nk.Select(c => c.Src));
+        }
 
         // ---------------- helpers de bajo nivel ----------------
 
@@ -207,11 +220,12 @@ namespace EtlStudio.Core
             var inp = c.Meta.InputCollection[0]; var vi = inp.GetVirtualInput(); var o = c.Meta.OutputCollection[0];
             for (int i = 0; i < colLen.Length; i += 2)
             {
-                string col = (string)colLen[i]; int len = (int)colLen[i + 1];
+                string col = (string)colLen[i]; var cmap = (ColumnMap)colLen[i + 1]; int len = DwSpec.VarcharLen(cmap.Type);
                 var vc = VC(vi, col);
                 var ic = c.Inst.SetUsageType(inp.ID, vi, vc.LineageID, DTSUsageType.UT_READONLY);
                 var oc = c.Inst.InsertOutputColumnAt(o.ID, o.OutputColumnCollection.Count, "Copy of " + col, "");
-                c.Inst.SetOutputColumnDataTypeProperties(o.ID, oc.ID, DT.DT_STR, len, 0, 0, 1252);
+                if (DwSpec.IsUnicode(cmap.Type)) c.Inst.SetOutputColumnDataTypeProperties(o.ID, oc.ID, DT.DT_WSTR, len, 0, 0, 0);   // NVARCHAR: Unicode, sin pagina de codigos
+                else c.Inst.SetOutputColumnDataTypeProperties(o.ID, oc.ID, DT.DT_STR, len, 0, 0, 1252);
                 c.Inst.SetOutputColumnProperty(o.ID, oc.ID, "SourceInputColumnLineageID", ic.LineageID);
             }
             return c;

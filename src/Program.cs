@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Linq;
 using System.Windows;
 using EtlStudio.Core;
 using EtlStudio.UI;
@@ -14,6 +15,9 @@ namespace EtlStudio
         /// --ddl spec.json               : imprime el DDL.
         /// --validate spec.json          : valida el diseno sin tocar bases de datos.
         /// --reconcile spec.json         : compara el DW cargado contra el origen (codigo 1 si no coincide).
+        /// --check [spec.json]           : comprueba los requisitos de este equipo (SSIS, MSOLEDBSQL, DSN, .NET).
+        /// --inspect paquete.dtsx spec.json : prueba de humo del paquete generado (sin SSIS ni bases de datos).
+        /// --all ... [--recreate] [--notify https://webhook] : el aviso final (OK o FALLO) se envia al webhook.
         /// </summary>
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
         static extern bool AttachConsole(int dwProcessId);
@@ -22,6 +26,25 @@ namespace EtlStudio
         public static int Main(string[] args)
         {
             if (args.Length > 0 && args[0].StartsWith("--")) AttachConsole(-1);   // app de ventanas: engancha la consola del que la invoca
+            AppDomain.CurrentDomain.UnhandledException += (o, e) => AppLog.Error("Excepcion no controlada", e.ExceptionObject as Exception);
+            if (args.Length >= 1 && args[0] == "--check")
+            {
+                DwSpec cs = null; try { if (args.Length > 1) cs = DwSpec.FromJson(File.ReadAllText(args[1])); } catch { }
+                var rs = Requirements.Check(cs == null ? null : cs.SourceDsn);
+                Console.WriteLine(Requirements.Format(rs));
+                return rs.All(r => r.Ok || r.Name.Contains("Excel")) ? 0 : 1;
+            }
+            if (args.Length >= 3 && args[0] == "--inspect")
+            {
+                try
+                {
+                    var probs = PackageInspector.Verify(DwSpec.FromJson(File.ReadAllText(args[2])), PackageInspector.Read(File.ReadAllText(args[1])));
+                    foreach (var p in probs) Console.Error.WriteLine("  - " + p);
+                    Console.WriteLine(probs.Count == 0 ? "Paquete conforme." : probs.Count + " problemas.");
+                    return probs.Count == 0 ? 0 : 1;
+                }
+                catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
+            }
             if (args.Length >= 2 && args[0] == "--ddl")
             {
                 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -96,8 +119,16 @@ namespace EtlStudio
                     var s = DwSpec.FromJson(File.ReadAllText(args[1]));
                     var errs = s.Validate(); if (errs.Count > 0) throw new Exception(string.Join("; ", errs));
                     var pkgPath = Path.GetFullPath(args[2]);
-                    var r = Pipeline.Run(new Plan { Titulo = s.DwName, Spec = s }, args.Length > 3 && args[3] == "--recreate", Path.GetDirectoryName(pkgPath),
-                        (id, st) => Console.WriteLine("[" + st + "] " + id), m => Console.WriteLine("    " + m), pkgPath);
+                    int ni = Array.IndexOf(args, "--notify"); string notify = ni >= 0 && ni + 1 < args.Length ? args[ni + 1] : null;
+                    PipelineResult r;
+                    try { r = Pipeline.Run(new Plan { Titulo = s.DwName, Spec = s }, args.Length > 3 && args[3] == "--recreate", Path.GetDirectoryName(pkgPath),
+                        (id, st) => Console.WriteLine("[" + st + "] " + id), m => Console.WriteLine("    " + m), pkgPath); }
+                    catch (Exception ex)
+                    {
+                        if (notify != null) { var err = Notifier.Send(notify, s.DwName, false, ex.Message, null); if (err != null) Console.Error.WriteLine("Aviso no enviado: " + err); }
+                        throw;
+                    }
+                    if (notify != null) { var err = Notifier.Send(notify, s.DwName, true, "Carga y reconciliacion correctas.", r.ReportPath); if (err != null) Console.Error.WriteLine("Aviso no enviado: " + err); }
                     foreach (var kv in r.Checks)
                     {
                         Console.WriteLine("== " + kv.Key.Title);

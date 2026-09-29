@@ -20,6 +20,17 @@ namespace EtlStudio.Core
         public string Name { get; set; }
         public string Key { get; set; }
         public List<ColumnMap> Columns { get; set; } = new List<ColumnMap>();
+        /// <summary>Columnas (origen) que identifican de forma unica un miembro. Vacio = todas las columnas.</summary>
+        public List<string> NaturalKey { get; set; } = new List<string>();
+
+        /// <summary>Columnas por las que el Lookup de la Fact busca la dimension: la llave natural, o todas si no se definio.</summary>
+        public List<ColumnMap> LookupColumns()
+        {
+            if (NaturalKey == null || NaturalKey.Count == 0) return Columns;
+            return Columns.Where(c => NaturalKey.Contains(c.Src, StringComparer.OrdinalIgnoreCase)).ToList();
+        }
+
+        public bool HasNaturalKey { get { return NaturalKey != null && NaturalKey.Count > 0; } }
     }
 
     public class ComputedSpec
@@ -67,9 +78,14 @@ namespace EtlStudio.Core
         public List<DimSpec> Dims { get; set; } = new List<DimSpec>();
         public FactSpec Fact { get; set; } = new FactSpec();
         public GoalsSpec Goals { get; set; }
+        /// <summary>Que hacer con un nulo en una columna de dimension: "Fail" (detiene la carga) o "Unknown" (lo carga como 'Desconocido').</summary>
+        public string NullPolicy { get; set; } = "Fail";
+
+        public const string UnknownMember = "Desconocido";
+        public bool UsesUnknownMember { get { return string.Equals(NullPolicy, "Unknown", StringComparison.OrdinalIgnoreCase); } }
 
         static readonly Regex Ident = new Regex(@"^[A-Za-z_][A-Za-z0-9_]{0,63}$");
-        static readonly Regex SqlType = new Regex(@"^(VARCHAR\(\d{1,4}\)|INT|BIGINT|DECIMAL\(\d{1,2},\d{1,2}\)|DATE|DATETIME|BIT|FLOAT)$", RegexOptions.IgnoreCase);
+        static readonly Regex SqlType = new Regex(@"^(N?VARCHAR\(\d{1,4}\)|INT|BIGINT|DECIMAL\(\d{1,2},\d{1,2}\)|DATE|DATETIME|BIT|FLOAT)$", RegexOptions.IgnoreCase);
         static readonly Regex SafeExpr = new Regex(@"^[A-Za-z0-9_ ()+\-*/.,]+$");
         static readonly Regex SrcIdent = new Regex(@"^[A-Za-z_][A-Za-z0-9_]*$");
 
@@ -124,13 +140,14 @@ namespace EtlStudio.Core
         public const int MaxTimeDays = 36525;   // 100 anios
         public const string AuditTableName = "ETL_Auditoria";
 
-        /// <summary>VARCHAR(1..8000) y DECIMAL(p<=38, s<=p): limites reales de SQL Server y de DT_STR.</summary>
+        /// <summary>VARCHAR(1..8000), NVARCHAR(1..4000) y DECIMAL(p<=38, s<=p): limites reales de SQL Server y de DT_STR.</summary>
         static bool TypeBounds(string t)
         {
-            var m = Regex.Match(t ?? "", @"^(VARCHAR|DECIMAL)\((\d+)(?:,(\d+))?\)$", RegexOptions.IgnoreCase);
+            var m = Regex.Match(t ?? "", @"^(N?VARCHAR|DECIMAL)\((\d+)(?:,(\d+))?\)$", RegexOptions.IgnoreCase);
             if (!m.Success) return true;
             int a = int.Parse(m.Groups[2].Value);
             if (m.Groups[1].Value.Equals("VARCHAR", StringComparison.OrdinalIgnoreCase)) return a >= 1 && a <= 8000;
+            if (m.Groups[1].Value.Equals("NVARCHAR", StringComparison.OrdinalIgnoreCase)) return a >= 1 && a <= 4000;
             int b = int.Parse(m.Groups[3].Value);
             return a >= 1 && a <= 38 && b <= a;
         }
@@ -177,6 +194,8 @@ namespace EtlStudio.Core
                 else if ((b - a).TotalDays > MaxTimeDays) e.Add("Rango de Time demasiado grande (maximo 100 anios)");
             }
 
+            if (!string.Equals(NullPolicy ?? "Fail", "Fail", StringComparison.OrdinalIgnoreCase) && !UsesUnknownMember) e.Add("NullPolicy debe ser 'Fail' o 'Unknown': '" + NullPolicy + "'");
+
             var tables = new List<string>();
             if (Time != null) tables.Add(Time.Name);
             if (Dims == null || Dims.Count == 0) e.Add("Debe haber al menos una dimension");
@@ -190,10 +209,21 @@ namespace EtlStudio.Core
                     foreach (var c in d.Columns)
                     {
                         cm(c, "Dim " + d.Name);
-                        if (c != null && c.Type != null && !c.Type.StartsWith("VARCHAR", StringComparison.OrdinalIgnoreCase)) e.Add("Las columnas de dimension deben ser VARCHAR (" + d.Name + "." + c.Dst + ")");
+                        if (c != null && c.Type != null && !IsText(c.Type)) e.Add("Las columnas de dimension deben ser VARCHAR o NVARCHAR (" + d.Name + "." + c.Dst + ")");
                     }
                     unique(d.Columns.Where(c => c != null).Select(c => c.Dst).Concat(new[] { d.Key }), "la dimension " + d.Name);
                     unique(d.Columns.Where(c => c != null).Select(c => c.Src), "las columnas origen de " + d.Name);
+                    if (UsesUnknownMember)
+                        foreach (var c in d.Columns.Where(c => c != null && c.Type != null && TypeBounds(c.Type)))
+                            if (IsText(c.Type) && VarcharLen(c.Type) < UnknownMember.Length) e.Add("NullPolicy 'Unknown' necesita al menos " + UnknownMember.Length + " caracteres en " + d.Name + "." + c.Dst);
+                    if (d.HasNaturalKey)
+                    {
+                        foreach (var k in d.NaturalKey.Where(k => !d.Columns.Any(c => c != null && string.Equals(c.Src, k, StringComparison.OrdinalIgnoreCase))))
+                            e.Add("La llave natural de " + d.Name + " incluye '" + k + "', que no es una columna de la dimension");
+                        unique(d.NaturalKey, "la llave natural de " + d.Name);
+                        int bytes = d.LookupColumns().Where(c => c != null && c.Type != null && TypeBounds(c.Type) && IsText(c.Type)).Sum(c => VarcharLen(c.Type) * (IsUnicode(c.Type) ? 2 : 1));
+                        if (bytes > 900) e.Add("La llave natural de " + d.Name + " ocupa " + bytes + " bytes y SQL Server limita un indice unico a 900");
+                    }
                 }
             }
             if (Dims != null) unique(Dims.Select(d => d.Key), "las llaves de las dimensiones");
@@ -203,7 +233,7 @@ namespace EtlStudio.Core
                 id(Fact.Name, "Fact.Name"); tables.Add(Fact.Name);
                 if (Fact.DateColumn == null || !SrcIdent.IsMatch(Fact.DateColumn)) e.Add("Fact.DateColumn invalida");
                 cm(Fact.BusinessKey, "Fact.BusinessKey");
-                if (Fact.BusinessKey != null && Fact.BusinessKey.Type != null && !Fact.BusinessKey.Type.StartsWith("VARCHAR", StringComparison.OrdinalIgnoreCase)) e.Add("Fact.BusinessKey debe ser VARCHAR");
+                if (Fact.BusinessKey != null && Fact.BusinessKey.Type != null && !IsText(Fact.BusinessKey.Type)) e.Add("Fact.BusinessKey debe ser VARCHAR o NVARCHAR");
                 var measureNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 if (Fact.Measures == null || Fact.Measures.Count == 0) e.Add("La tabla de hechos necesita medidas");
                 else
@@ -243,6 +273,8 @@ namespace EtlStudio.Core
                 if (string.IsNullOrWhiteSpace(Goals.Sheet)) e.Add("Goals.Sheet vacio");
                 else if (!ExcelSheet.IsMatch(Goals.Sheet)) e.Add("Goals.Sheet contiene caracteres no permitidos: '" + Goals.Sheet + "'");
                 if (Dims != null && !Dims.Any(d => d.Name == Goals.DimName)) e.Add("Goals.DimName no existe en Dims");
+                else if (Dims != null && Dims.First(d => d.Name == Goals.DimName).HasNaturalKey && Dims.First(d => d.Name == Goals.DimName).LookupColumns().Count != 1)
+                    e.Add("La dimension de las metas (" + Goals.DimName + ") debe tener una llave natural de una sola columna, porque el Excel aporta un solo valor para buscarla");
                 foreach (var c in new[] { Goals.ExcelDimColumn, Goals.ExcelDateColumn, Goals.ExcelMeasureColumn })
                     if (string.IsNullOrWhiteSpace(c)) e.Add("Faltan columnas del Excel en Goals");
                     else if (!ExcelName.IsMatch(c)) e.Add("Columna de Excel con caracteres no permitidos: '" + c + "'");
@@ -251,6 +283,26 @@ namespace EtlStudio.Core
             tables.Add(AuditTableName);
             unique(tables, "las tablas del DW");
             return e;
+        }
+
+        public static bool IsText(string type) { return type != null && type.StartsWith("VARCHAR(", StringComparison.OrdinalIgnoreCase) || type != null && IsUnicode(type); }
+
+        public static bool IsUnicode(string type) { return type != null && type.StartsWith("NVARCHAR(", StringComparison.OrdinalIgnoreCase); }
+
+        /// <summary>
+        /// SELECT que leen la carga y la reconciliacion. Con NullPolicy 'Unknown' reemplaza los nulos de las columnas de
+        /// dimension por 'Desconocido'; solo devuelve las columnas que el modelo usa.
+        /// </summary>
+        public string EffectiveSource()
+        {
+            if (!UsesUnknownMember) return SourceQuery;
+            var dimCols = new HashSet<string>(Dims.SelectMany(d => d.Columns.Select(c => c.Src)), StringComparer.OrdinalIgnoreCase);
+            var cols = new List<string> { Fact.BusinessKey.Src, Fact.DateColumn };
+            cols.AddRange(Dims.SelectMany(d => d.Columns.Select(c => c.Src)));
+            cols.AddRange(Fact.Measures.Select(m => m.Src));
+            var sel = cols.Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(c => dimCols.Contains(c) ? "COALESCE(q." + c + ", '" + UnknownMember + "') AS " + c : "q." + c);
+            return "SELECT " + string.Join(", ", sel) + " FROM (" + SourceQuery + ") AS q";
         }
 
         public static int VarcharLen(string type)

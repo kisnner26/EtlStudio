@@ -30,15 +30,26 @@ Descarga/compila `dist\EtlStudio-Setup.exe` y ejecutalo: instala solo para tu us
 5. **Verificar**: consultas de solo lectura y comentadas (conteos, huerfanos, duplicados, metas de Excel), la **reconciliacion origen vs destino** y explicacion de los resultados por Claude.
 6. **Asistente**: chat con Claude que conoce tu diseno y el log para diagnosticar errores.
 
-El paquete generado sigue el patron del curso: `SQL_Auditoria_Inicio` -> `SQL_Limpiar_Destino` -> `DFT_Poblar_Dimensiones` (ADO NET -> Conversion de datos -> OLE DB) -> `DFT_Extraer_Origen` (ADO NET -> Conversion de datos a `DT_STR` -> Lookups por dimension -> Columna derivada `SK_Tiempo` -> carga rapida) -> `DFT_Cargar_Metas_Excel` (opcional) -> `SQL_Auditoria_Fin`.
+El paquete generado sigue el patron del curso: `SQL_Auditoria_Inicio` -> `SQL_Preparar_Staging` -> `DFT_Poblar_Dimensiones` (ADO NET -> Conversion de datos -> OLE DB) -> `DFT_Extraer_Origen` (ADO NET -> Conversion de datos a `DT_STR`/`DT_WSTR` -> Lookups por dimension -> Columna derivada `SK_Tiempo` -> carga rapida) -> `DFT_Cargar_Metas_Excel` (opcional) -> `SQL_Publicar` -> `SQL_Auditoria_Fin`. Todo se carga en el esquema `stg` y `SQL_Publicar` lo pasa a `dbo` en una transaccion. Diagramas en [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
+
+### Opciones del diseno
+
+- `NaturalKey` (por dimension): columnas del origen que identifican un miembro; el Lookup busca solo por ellas.
+- `NullPolicy` (`Fail` | `Unknown`): que hacer con un nulo en una columna de dimension.
+- Tipos `VARCHAR(n)` o `NVARCHAR(n)` (Unicode) en dimensiones y llave de negocio.
+
+### Comandos
+
+`--all spec.json salida.dtsx [--recreate] [--notify https://webhook]`, `--validate`, `--reconcile`, `--check [spec.json]`, `--inspect paquete.dtsx spec.json`, `--ddl`, `--build`. Programar la carga: `tools\schedule-task.ps1`. Problemas: [docs/SOLUCION_DE_PROBLEMAS.md](docs/SOLUCION_DE_PROBLEMAS.md). Estado del plan de mejoras: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Que garantiza (y que no)
 
 - **Nunca pierde hechos en silencio.** Los lookups de la Fact fallan si una fila no encuentra su dimension. Despues de cargar, la **reconciliacion** compara origen y destino: filas, llaves de negocio distintas, fecha minima y maxima y la suma de cada medida (con tolerancia solo por el redondeo a 2 decimales). Si algo no cuadra, el proceso termina en error, pero el reporte con la evidencia se escribe igual.
 - **Rechaza un origen que el modelo no admite** antes de crear nada: nulos en llaves, fechas, dimensiones o medidas, y fechas fuera del rango de `Dim_Tiempo`.
+- **Un fallo no destruye el DW.** La carga escribe en tablas de paso y el destino solo cambia al publicar, en una transaccion.
 - **Deja rastro.** Cada corrida queda en `dbo.ETL_Auditoria` (`EnCurso`, `OK` o `Fallido`, con conteos). Una corrida que se cae queda como `EnCurso` y la siguiente la cierra como `Fallido`.
 - **El paquete no guarda secretos** (`DontSaveSensitive`): se puede abrir en otro equipo, que necesitara su propio DSN con el token.
-- **No garantiza** que el diseno propuesto por la IA sea el correcto para tu negocio: revisalo antes de ejecutar. Tampoco compara el contenido columna a columna, solo conteos, llaves, fechas y sumas.
+- **No garantiza** que el diseno propuesto por la IA sea el correcto para tu negocio: revisalo antes de ejecutar. Tampoco compara el contenido columna a columna, solo conteos, llaves, fechas y sumas. La carga es completa (no incremental) y una llave sin dimension detiene la carga en lugar de enviarse a una tabla de rechazos.
 
 ## Requisitos
 

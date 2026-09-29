@@ -1,0 +1,28 @@
+name: release
+
+# Al publicar una etiqueta vX.Y.Z se corren las pruebas y se crea el release con las notas del CHANGELOG.
+# El instalador (.exe) requiere SSIS y WPF de Windows: se compila con build.ps1 y se adjunta al release a mano.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar Mono
+        run: sudo apt-get update && sudo apt-get install -y mono-devel
+      - name: Pruebas del nucleo
+        run: ./tests/run.sh
+      - name: Notas de la version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## " v "$" {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "No hay seccion $v en CHANGELOG.md"; exit 1; }
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md

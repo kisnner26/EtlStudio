@@ -13,7 +13,7 @@
     <LangVersion>latest</LangVersion>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationIcon>assets\EtlStudio.ico</ApplicationIcon>
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
     <Prefer32Bit>false</Prefer32Bit>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -64,6 +64,10 @@
     <Compile Include="src\Core\Plan.cs" />
     <Compile Include="src\Core\DocxWriter.cs" />
     <Compile Include="src\Core\Pipeline.cs" />
+    <Compile Include="src\Core\AppLog.cs" />
+    <Compile Include="src\Core\Notifier.cs" />
+    <Compile Include="src\Core\PackageInspector.cs" />
+    <Compile Include="src\Core\Requirements.cs" />
     <Compile Include="src\Core\ClaudeCode.cs" />
     <Compile Include="src\UI\MainWindow.cs" />
     <Compile Include="src\UI\Theme.cs" />

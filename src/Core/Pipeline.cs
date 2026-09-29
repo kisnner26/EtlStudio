@@ -32,6 +32,16 @@ namespace EtlStudio.Core
         /// <param name="step">(id, estado: run | ok | fail)</param>
         public static PipelineResult Run(Plan plan, bool recreate, string outDir, Action<string, string> step, Action<string> log, string packagePath = null)
         {
+            var origStep = step; var origLog = log;
+            step = (id, st) => { AppLog.Info("paso " + id + ": " + st); origStep(id, st); };
+            log = m => { AppLog.Info(m); origLog(m); };
+            AppLog.Info("Inicio de la corrida: " + plan.Spec.DwName + " (recrear=" + recreate + ")");
+            try { var r = RunCore(plan, recreate, outDir, step, log, packagePath); AppLog.Info("Corrida terminada correctamente."); return r; }
+            catch (Exception ex) { AppLog.Error("La corrida fallo", ex); throw; }
+        }
+
+        static PipelineResult RunCore(Plan plan, bool recreate, string outDir, Action<string, string> step, Action<string> log, string packagePath)
+        {
             var s = plan.Spec; var res = new PipelineResult();
             Directory.CreateDirectory(outDir);
             Func<string, Action, bool> stage = (id, work) =>
@@ -79,6 +89,7 @@ namespace EtlStudio.Core
                 if (recreate) SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.DropDatabase(s));
                 SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.CreateDatabase(s));
                 SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.Tables(s));
+                SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.StagingPrepare(s));   // el paquete escribe en stg; SSIS necesita que existan para leer su metadata
                 log("Base '" + s.DwName + "' y tablas listas en " + s.SqlServer + ".");
             });
 
@@ -141,8 +152,10 @@ namespace EtlStudio.Core
             if (s.Goals != null) d.Bullet("Metas desde Excel: " + s.Goals.Table);
             d.Heading("Consulta de origen").Code(s.SourceQuery);
             d.Heading("Paquete SSIS").Para(res.PackagePath);
-            d.Bullet("SQL_Auditoria_Inicio  →  SQL_Limpiar_Destino  →  DFT_Poblar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel  " : "") + "→  SQL_Auditoria_Fin");
-            d.Bullet("Conversion de datos a DT_STR, Lookups por dimension (una llave sin dimension detiene la carga), columna derivada SK_Tiempo y carga rapida.");
+            d.Bullet("SQL_Auditoria_Inicio  →  SQL_Preparar_Staging  →  DFT_Poblar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel  " : "") + "→  SQL_Publicar  →  SQL_Auditoria_Fin");
+            d.Bullet("La carga escribe en tablas de paso (esquema stg) y SQL_Publicar las pasa al destino en una sola transaccion: si algo falla, el DW queda como estaba.");
+            d.Bullet("Conversion de datos a DT_STR (DT_WSTR en NVARCHAR), Lookups por dimension (una llave sin dimension detiene la carga), columna derivada SK_Tiempo y carga rapida.");
+            if (s.UsesUnknownMember) d.Bullet("Politica de nulos: un nulo en una columna de dimension se carga como '" + DwSpec.UnknownMember + "'.");
             d.Bullet("Cada corrida queda registrada en dbo." + DwSpec.AuditTableName + " (EnCurso, OK o Fallido).");
             d.Heading("Verificacion");
             foreach (var kv in res.Checks)

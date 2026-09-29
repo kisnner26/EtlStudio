@@ -35,6 +35,7 @@ namespace EtlStudio.Core
                 sb.AppendLine("IF OBJECT_ID('dbo." + d.Name + "') IS NULL CREATE TABLE dbo." + d.Name + " (");
                 sb.AppendLine("    " + d.Key + " INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
                 foreach (var c in d.Columns) sb.AppendLine("    " + c.Dst + " " + c.Type.ToUpper() + " NOT NULL,");
+                if (d.HasNaturalKey) sb.AppendLine("    CONSTRAINT UQ_" + d.Name + "_LlaveNatural UNIQUE (" + string.Join(", ", d.LookupColumns().Select(c => c.Dst)) + "),");
                 sb.AppendLine("    Fecha_Creacion DATETIME DEFAULT GETDATE());");
                 sb.AppendLine();
             }
@@ -105,6 +106,79 @@ namespace EtlStudio.Core
                    "    Filas_Fact = (SELECT COUNT_BIG(*) FROM dbo." + s.Fact.Name + "),\n" +
                    "    Filas_Dimensiones = " + dims + "\n" +
                    "WHERE Id = (SELECT MAX(Id) FROM dbo." + DwSpec.AuditTableName + " WHERE Estado = 'EnCurso');";
+        }
+
+        public const string StagingSchema = "stg";
+
+        /// <summary>Tablas de paso (esquema stg): la carga escribe aqui y el destino solo cambia al publicar. Se recrean en cada corrida.</summary>
+        public static string StagingPrepare(DwSpec s)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("IF SCHEMA_ID('" + StagingSchema + "') IS NULL EXEC('CREATE SCHEMA " + StagingSchema + "');");
+            foreach (var n in StagingTables(s).AsEnumerable().Reverse()) sb.AppendLine("IF OBJECT_ID('" + StagingSchema + "." + n + "', 'U') IS NOT NULL DROP TABLE " + StagingSchema + "." + n + ";");
+            foreach (var d in s.Dims)
+            {
+                sb.AppendLine("CREATE TABLE " + StagingSchema + "." + d.Name + " (" + d.Key + " INT IDENTITY(1,1) NOT NULL PRIMARY KEY, "
+                    + string.Join(", ", d.Columns.Select(c => c.Dst + " " + c.Type.ToUpper() + " NOT NULL"))
+                    + (d.HasNaturalKey ? ", CONSTRAINT UQ_stg_" + d.Name + " UNIQUE (" + string.Join(", ", d.LookupColumns().Select(c => c.Dst)) + ")" : "") + ");");
+            }
+            var f = s.Fact;
+            sb.AppendLine("CREATE TABLE " + StagingSchema + "." + f.Name + " (SK_Tiempo INT NOT NULL, " + string.Concat(s.Dims.Select(d => d.Key + " INT NOT NULL, "))
+                + f.BusinessKey.Dst + " " + f.BusinessKey.Type.ToUpper() + " NOT NULL, " + string.Join(", ", f.Measures.Select(m => m.Dst + " " + m.Type.ToUpper() + " NOT NULL")) + ");");
+            if (s.Goals != null)
+            {
+                var gd = s.Dims.First(d => d.Name == s.Goals.DimName);
+                sb.AppendLine("CREATE TABLE " + StagingSchema + "." + s.Goals.Table + " (SK_Tiempo INT NOT NULL, " + gd.Key + " INT NOT NULL, Monto_Meta DECIMAL(18,2) NOT NULL);");
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Tablas de paso en orden de creacion (dimensiones, hechos, metas).</summary>
+        static System.Collections.Generic.List<string> StagingTables(DwSpec s)
+        {
+            var l = s.Dims.Select(d => d.Name).ToList(); l.Add(s.Fact.Name);
+            if (s.Goals != null) l.Add(s.Goals.Table);
+            return l;
+        }
+
+        /// <summary>
+        /// Publica lo cargado en stg hacia dbo en una sola transaccion: si algo falla, se deshace y el destino queda como estaba.
+        /// Las dimensiones conservan sus llaves (IDENTITY_INSERT), asi los hechos ya apuntan a ellas.
+        /// </summary>
+        public static string Publish(DwSpec s)
+        {
+            var sb = new StringBuilder();
+            var f = s.Fact;
+            sb.AppendLine("SET XACT_ABORT ON;");
+            sb.AppendLine("BEGIN TRY");
+            sb.AppendLine("BEGIN TRANSACTION;");
+            if (s.Goals != null) sb.AppendLine("DELETE FROM dbo." + s.Goals.Table + ";");
+            sb.AppendLine("DELETE FROM dbo." + f.Name + ";");
+            foreach (var d in s.Dims) sb.AppendLine("DELETE FROM dbo." + d.Name + ";");
+            foreach (var n in new[] { f.Name }.Concat(s.Goals != null ? new[] { s.Goals.Table } : new string[0]))
+                sb.AppendLine("IF EXISTS (SELECT 1 FROM sys.identity_columns WHERE object_id = OBJECT_ID('dbo." + n + "') AND last_value IS NOT NULL) DBCC CHECKIDENT ('dbo." + n + "', RESEED, 0) WITH NO_INFOMSGS;");
+            foreach (var d in s.Dims)
+            {
+                var cols = d.Key + ", " + string.Join(", ", d.Columns.Select(c => c.Dst));
+                sb.AppendLine("SET IDENTITY_INSERT dbo." + d.Name + " ON;");
+                sb.AppendLine("INSERT INTO dbo." + d.Name + " (" + cols + ") SELECT " + cols + " FROM " + StagingSchema + "." + d.Name + ";");
+                sb.AppendLine("SET IDENTITY_INSERT dbo." + d.Name + " OFF;");
+            }
+            var fcols = "SK_Tiempo, " + string.Concat(s.Dims.Select(d => d.Key + ", ")) + f.BusinessKey.Dst + ", " + string.Join(", ", f.Measures.Select(m => m.Dst));
+            sb.AppendLine("INSERT INTO dbo." + f.Name + " (" + fcols + ") SELECT " + fcols + " FROM " + StagingSchema + "." + f.Name + ";");
+            if (s.Goals != null)
+            {
+                var gd = s.Dims.First(d => d.Name == s.Goals.DimName);
+                sb.AppendLine("INSERT INTO dbo." + s.Goals.Table + " (SK_Tiempo, " + gd.Key + ", Monto_Meta) SELECT SK_Tiempo, " + gd.Key + ", Monto_Meta FROM " + StagingSchema + "." + s.Goals.Table + ";");
+            }
+            sb.AppendLine("COMMIT TRANSACTION;");
+            sb.AppendLine("END TRY");
+            sb.AppendLine("BEGIN CATCH");
+            sb.AppendLine("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;");
+            sb.AppendLine("THROW;");
+            sb.AppendLine("END CATCH;");
+            foreach (var n in StagingTables(s).AsEnumerable().Reverse()) sb.AppendLine("DROP TABLE " + StagingSchema + "." + n + ";");
+            return sb.ToString();
         }
 
         /// <summary>Sentencias de limpieza previas a cada carga (orden respetando FKs, reseed condicional).</summary>

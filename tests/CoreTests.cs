@@ -238,9 +238,173 @@ public static class CoreTests
             Check(p.Conexion != null && p.Pasos != null && p.Advertencias != null, "listas por defecto");
         });
 
+        // ---------------- carga segura: staging y publicacion ----------------
+        Test("staging: crea stg y las tablas de paso sin FKs", () =>
+        {
+            var sql = DdlGenerator.StagingPrepare(Sample());
+            Check(sql.Contains("CREATE SCHEMA stg") && sql.Contains("CREATE TABLE stg.Dim_Sucursal") && sql.Contains("CREATE TABLE stg.Fact_VentasAutos") && sql.Contains("CREATE TABLE stg.Fact_MetasVentas"), "tablas");
+            Check(!sql.Contains("FOREIGN KEY") && !sql.Contains("PERSISTED"), "sin FKs ni calculadas");
+            Check(!sql.Contains("dbo."), "no toca dbo");
+            Check(sql.IndexOf("DROP TABLE stg.Fact_VentasAutos") < sql.IndexOf("DROP TABLE stg.Dim_Sucursal"), "borra la Fact antes que las dimensiones");
+        });
+        Test("publicar: una transaccion con rollback, conserva las llaves de las dimensiones", () =>
+        {
+            var sql = DdlGenerator.Publish(Sample());
+            Check(sql.Contains("BEGIN TRANSACTION") && sql.Contains("COMMIT TRANSACTION") && sql.Contains("ROLLBACK TRANSACTION") && sql.Contains("THROW;") && sql.Contains("XACT_ABORT ON"), "transaccion");
+            Check(sql.Contains("SET IDENTITY_INSERT dbo.Dim_Sucursal ON") && sql.Contains("FROM stg.Dim_Sucursal"), "identity insert");
+            Check(sql.IndexOf("DELETE FROM dbo.Fact_VentasAutos") < sql.IndexOf("DELETE FROM dbo.Dim_Sucursal"), "borra hechos antes que dimensiones");
+            Check(sql.IndexOf("INSERT INTO dbo.Dim_Vehiculo") < sql.IndexOf("INSERT INTO dbo.Fact_VentasAutos"), "inserta dimensiones antes que hechos");
+            Check(sql.IndexOf("INSERT INTO dbo.Fact_VentasAutos") < sql.IndexOf("INSERT INTO dbo.Fact_MetasVentas"), "metas al final");
+            Check(!sql.Contains("Ingreso_Total"), "las columnas calculadas las calcula SQL Server");
+            Check(sql.LastIndexOf("END CATCH;") < sql.IndexOf("DROP TABLE stg.Fact_VentasAutos"), "solo borra el staging si publico bien");
+            Check(!sql.Contains("ETL_Auditoria"), "no toca la auditoria");
+        });
+
+        // ---------------- Unicode ----------------
+        Test("NVARCHAR: se acepta, con limite 4000, y llega al DDL", () =>
+        {
+            var s = Sample(); s.Dims[1].Columns[1].Type = "NVARCHAR(80)";
+            Check(s.Validate().Count == 0, string.Join("; ", s.Validate()));
+            Check(DdlGenerator.Tables(s).Contains("Marca NVARCHAR(80) NOT NULL"), "DDL");
+            Check(DwSpec.IsUnicode("nvarchar(80)") && !DwSpec.IsUnicode("VARCHAR(80)"), "IsUnicode");
+            s = Sample(); s.Dims[1].Columns[1].Type = "NVARCHAR(5000)"; Check(Has(s.Validate(), "fuera de rango"), "limite");
+            s = Sample(); s.Dims[1].Columns[1].Type = "NVARCHAR(MAX)"; Check(Has(s.Validate(), "Tipo SQL"), "MAX");
+            s = Sample(); s.Fact.BusinessKey.Type = "NVARCHAR(40)"; Check(s.Validate().Count == 0, "llave de negocio Unicode");
+        });
+
+        // ---------------- llave natural ----------------
+        Test("llave natural: valida, restringe el lookup y agrega UNIQUE", () =>
+        {
+            var s = Sample(); s.Dims[1].NaturalKey = new List<string> { "vin_corto" };
+            Check(s.Validate().Count == 0, string.Join("; ", s.Validate()));
+            Check(s.Dims[1].LookupColumns().Count == 1 && s.Dims[1].LookupColumns()[0].Dst == "VIN_Corto", "lookup solo por la llave");
+            Check(Sample().Dims[1].LookupColumns().Count == 4, "sin llave natural busca por todas");
+            Check(DdlGenerator.Tables(s).Contains("UNIQUE (VIN_Corto)"), "UNIQUE en el DDL");
+            Check(DdlGenerator.StagingPrepare(s).Contains("UNIQUE (VIN_Corto)"), "UNIQUE en staging");
+            s.Dims[1].NaturalKey = new List<string> { "no_existe" }; Check(Has(s.Validate(), "no es una columna"), "columna inexistente");
+            s = Sample(); s.Dims[1].NaturalKey = new List<string> { "marca", "MARCA" }; Check(Has(s.Validate(), "Nombre repetido"), "repetida");
+        });
+        Test("llave natural: la dimension de metas necesita una sola columna", () =>
+        {
+            var s = Sample(); s.Dims[0].NaturalKey = new List<string> { "sucursal" }; Check(s.Validate().Count == 0, "una columna");
+            s = Sample(); s.Goals.DimName = "Dim_Vehiculo"; s.Dims[1].NaturalKey = new List<string> { "marca", "modelo" };
+            Check(Has(s.Validate(), "una sola columna"), "dos columnas");
+        });
+        Test("llave natural: el indice unico respeta el limite de 900 bytes", () =>
+        {
+            var s = Sample(); s.Dims[1].Columns[0].Type = "NVARCHAR(400)"; s.Dims[1].Columns[1].Type = "NVARCHAR(100)";
+            s.Dims[1].NaturalKey = new List<string> { "vin_corto", "marca" }; Check(Has(s.Validate(), "900"), "limite");
+        });
+
+        // ---------------- politica de nulos ----------------
+        Test("NullPolicy: solo Fail o Unknown", () =>
+        {
+            var s = Sample(); s.NullPolicy = "Ignorar"; Check(Has(s.Validate(), "NullPolicy"), "invalida");
+            s = Sample(); s.NullPolicy = "unknown"; Check(s.Validate().Count == 0, "insensible a mayusculas");
+            s = Sample(); s.NullPolicy = "Unknown"; s.Dims[0].Columns[0].Type = "VARCHAR(5)"; Check(Has(s.Validate(), "al menos"), "longitud minima para 'Desconocido'");
+        });
+        Test("NullPolicy Unknown: el origen se lee con COALESCE y los nulos de dimension no detienen la carga", () =>
+        {
+            var s = Sample(); s.NullPolicy = "Unknown";
+            var q = s.EffectiveSource();
+            Check(q.Contains("COALESCE(q.marca, 'Desconocido') AS marca") && q.Contains("q.id_venta") && q.Contains("q.precio_lista") && !q.Contains("COALESCE(q.precio_lista"), "coalesce solo en dimensiones: " + q);
+            Check(Sample().EffectiveSource() == Sample().SourceQuery, "con Fail el origen no se toca");
+            var p = GoodProfile(s); p["null_marca"] = 12L;
+            Check(Reconciliation.Preflight(s, p).Count == 0, "un nulo de dimension se acepta");
+            p["null_precio_lista"] = 3L; Check(Has(Reconciliation.Preflight(s, p), "precio_lista"), "un nulo en una medida sigue deteniendo");
+            p = GoodProfile(s); p["null_fecha_venta"] = 1L; Check(Has(Reconciliation.Preflight(s, p), "fecha_venta"), "y en la fecha");
+        });
+
+        // ---------------- regresion: datos con defecto (P0 #4) ----------------
+        Test("regresion: una fila sin dimension o con un nulo hace fallar con el mensaje esperado", () =>
+        {
+            var s = Sample();
+            var conNulo = GoodProfile(s); conNulo["null_sucursal"] = 1L;
+            var e = Reconciliation.Preflight(s, conNulo);
+            Check(e.Count == 1 && e[0].Contains("'sucursal'") && e[0].Contains("1 valores nulos") && e[0].Contains("NOT NULL"), "nulo: " + string.Join("; ", e));
+            var dst = GoodDest(s); dst["n_rows"] = 29L;   // una fila cayo por no encontrar su dimension
+            var r = Reconciliation.Compare(s, GoodProfile(s), dst);
+            Check(!r.Ok && r.FailureText().Contains("Filas de Fact_VentasAutos: origen 30, destino 29"), r.FailureText());
+        });
+
+        // ---------------- prueba de humo del paquete ----------------
+        Test("inspector: un paquete conforme pasa y uno con defectos falla", () =>
+        {
+            var s = Sample();
+            var ok = PackageInspector.Verify(s, PackageInspector.Read(FakePackage(s, "0", "0", true)));
+            Check(ok.Count == 0, string.Join("; ", ok));
+            var bad = PackageInspector.Verify(s, PackageInspector.Read(FakePackage(s, "1", "1", false)));
+            Check(Has(bad, "ProtectionLevel") && Has(bad, "NoMatchBehavior=1") && Has(bad, "Falta la columna derivada"), string.Join("; ", bad));
+            var noOrder = PackageInspector.Read(FakePackage(s, "0", "0", true).Replace("SQL_Publicar", "SQL_Otra"));
+            Check(Has(PackageInspector.Verify(s, noOrder), "Orden de tareas"), "orden");
+        });
+        Test("inspector: el lookup de metas puede redirigir, solo los de la Fact deben fallar", () =>
+        {
+            var s = Sample();
+            var info = PackageInspector.Read(FakePackage(s, "0", "0", true));
+            Check(info.LookupBehavior["DFT_Cargar_Metas_Excel|LK_Sucursal"] == "1", "metas redirige");
+            Check(PackageInspector.Verify(s, info).Count == 0, "y aun asi es conforme");
+        });
+
+        // ---------------- registro y avisos ----------------
+        Test("registro: escribe, rota y oculta secretos", () =>
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "etlstudio-log-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                AppLog.LogDirectory = dir;
+                AppLog.Info("conectando con PWD=secreto123;Dsn=x token: dapi0123456789abcdef");
+                var txt = File.ReadAllText(AppLog.FilePath);
+                Check(txt.Contains("INFO ") && txt.Contains("conectando") && !txt.Contains("secreto123") && !txt.Contains("dapi0123"), "secretos: " + txt);
+                File.WriteAllText(AppLog.FilePath, new string('x', (int)AppLog.MaxBytes + 10));
+                AppLog.Info("despues de rotar");
+                Check(File.Exists(AppLog.FilePath + ".1") && File.ReadAllText(AppLog.FilePath).Contains("despues de rotar") && new FileInfo(AppLog.FilePath).Length < 1000, "rotacion");
+                for (int i = 0; i < 8; i++) { File.WriteAllText(AppLog.FilePath, new string('x', (int)AppLog.MaxBytes + 10)); AppLog.Info("n" + i); }
+                Check(Directory.GetFiles(dir).Length <= AppLog.Keep + 1, "conserva un maximo de archivos: " + Directory.GetFiles(dir).Length);
+            }
+            finally { AppLog.LogDirectory = null; try { Directory.Delete(dir, true); } catch { } }
+        });
+        Test("notificacion: JSON escapado y solo HTTPS", () =>
+        {
+            var j = Notifier.Json("DW_X", false, "linea1\nlinea \"2\" \\ fin", "C:\\r.docx");
+            Check(j.Contains("\"ok\":false") && j.Contains("FALLO - DW_X") && j.Contains("\\n") && j.Contains("\\\"2\\\""), j);
+            Check(new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(j)["dw"].ToString() == "DW_X", "JSON valido");
+            Check(Notifier.IsValidUrl("https://example.com/hook") && !Notifier.IsValidUrl("http://example.com/hook") && !Notifier.IsValidUrl("no es url"), "URL");
+            Check(Notifier.Send("http://x", "d", true, "m", null) != null, "rechaza http");
+        });
+        Test("requisitos: el formato senala lo que falta y como resolverlo", () =>
+        {
+            var t = Requirements.Format(new List<Requirement> { new Requirement { Name = "A", Ok = true, Detail = "ok" }, new Requirement { Name = "B", Ok = false, Detail = "no", Fix = "instala B" } });
+            Check(t.Contains("[OK]  A") && t.Contains("[FALTA] B") && t.Contains("-> instala B"), t);
+        });
+
         Console.WriteLine();
         Console.WriteLine(failed == 0 ? "OK: " + passed + " comprobaciones correctas." : "FALLARON " + failed + " de " + (passed + failed) + " comprobaciones.");
         return failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>Paquete .dtsx minimo con la estructura que EtlStudio genera (segun el formato de SSIS 2012+; no es un paquete real).</summary>
+    static string FakePackage(DwSpec s, string protection, string factNoMatch, bool withSk)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("<?xml version=\"1.0\"?><DTS:Executable xmlns:DTS=\"www.microsoft.com/SqlServer/Dts\" DTS:ExecutableType=\"Microsoft.Package\" DTS:ProtectionLevel=\"" + protection + "\"><DTS:Executables>");
+        foreach (var n in PackageInspector.ExpectedOrder(s))
+        {
+            sb.Append("<DTS:Executable DTS:ObjectName=\"" + n + "\">");
+            if (n == "DFT_Extraer_Origen")
+            {
+                foreach (var d in s.Dims) sb.Append("<component name=\"LK_" + d.Name.Replace("Dim_", "") + "\"><properties><property name=\"NoMatchBehavior\">" + factNoMatch + "</property></properties></component>");
+                if (withSk) sb.Append("<component name=\"DC_SK_Tiempo\"><properties><property name=\"FriendlyExpression\">(DT_I4)(YEAR((DT_DBTIMESTAMP)fecha_venta) * 10000 + MONTH((DT_DBTIMESTAMP)fecha_venta) * 100 + DAY((DT_DBTIMESTAMP)fecha_venta))</property></properties></component>");
+            }
+            if (n == "DFT_Cargar_Metas_Excel")
+                sb.Append("<component name=\"LK_Sucursal\"><properties><property name=\"NoMatchBehavior\">1</property></properties></component>");
+            sb.Append("</DTS:Executable>");
+        }
+        sb.Append("</DTS:Executables><DTS:PrecedenceConstraints>");
+        var o = PackageInspector.ExpectedOrder(s);
+        for (int i = 1; i < o.Count; i++) sb.Append("<DTS:PrecedenceConstraint DTS:From=\"Package\\" + o[i - 1] + "\" DTS:To=\"Package\\" + o[i] + "\"/>");
+        sb.Append("</DTS:PrecedenceConstraints></DTS:Executable>");
+        return sb.ToString();
     }
 
     static void s_noGoals(List<Check> withGoals)

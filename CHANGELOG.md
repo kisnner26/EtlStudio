@@ -1,5 +1,23 @@
 # Cambios
 
+## 1.3.0
+
+Carga que no destruye el DW, datos reales sucios y operacion.
+
+- **Carga por tablas de paso (esquema `stg`) y publicacion transaccional.** Se quito `SQL_Limpiar_Destino`. La carga escribe en `stg.*` y `SQL_Publicar` pasa todo a `dbo` en una sola transaccion (con `IDENTITY_INSERT` para conservar las llaves): si algo falla, el DW queda como estaba.
+- **Llave natural por dimension** (`NaturalKey`, opcional): el Lookup busca solo por ella (no por todas las columnas), la dimension recibe un indice `UNIQUE` y se puebla una fila por llave.
+- **Politica de nulos** (`NullPolicy`: `Fail` por defecto | `Unknown`): con `Unknown`, un nulo en una columna de dimension se carga como `Desconocido` en lugar de detener el proceso.
+- **Unicode**: se admite `NVARCHAR(1..4000)` en dimensiones y llave de negocio (`DT_WSTR` en el paquete).
+- **Requisitos al arrancar**: `--check` comprueba .NET, SSIS, MSOLEDBSQL, ACE y el DSN, e indica como resolver cada faltante.
+- **Registro de la aplicacion** rotativo en `%APPDATA%\EtlStudio\logs` (sin tokens). **Aviso de resultado** a un webhook HTTPS con `--all ... --notify <url>`.
+- **`--inspect paquete.dtsx spec.json`**: prueba de humo del paquete generado (orden de tareas, `ProtectionLevel`, `NoMatchBehavior` de los lookups de la Fact y expresion de `SK_Tiempo`), sin SSIS ni bases de datos.
+- `tools/schedule-task.ps1` (ejecucion programada), flujo de release, `docs/ARQUITECTURA.md`, `docs/SOLUCION_DE_PROBLEMAS.md` y `docs/ROADMAP.md` con el estado de cada punto.
+- Pruebas: de 76 a 127 comprobaciones (staging, publicacion, Unicode, llave natural, politica de nulos, regresion con datos con defecto, inspector, registro, avisos).
+
+**Cambios que rompen compatibilidad**: el paquete ya no tiene `SQL_Limpiar_Destino`; los `.dtsx` generados con 1.2.0 deben regenerarse. Los lookups leen de `stg`, por lo que el paquete necesita las tablas `stg.*` para validarse (el proceso completo las crea).
+
+**Sin verificar en Windows**: `SsisBuilder` (staging, llave natural, `DT_WSTR`), `Program` y la interfaz no se compilaron ni ejecutaron aqui. Ejecuta `--all` con `--recreate` y luego `--inspect` antes de darlo por bueno.
+
 ## 1.2.0
 
 Fiabilidad de la carga y del diseno.
