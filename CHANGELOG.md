@@ -1,5 +1,12 @@
 # Cambios
 
+## 1.4.2
+
+Segunda corrida real en Windows (`samples/autos_incremental.json`, dos corridas, con una fila fabricada de fecha 1999): exit 0 en ambas. Verificado: carga incremental (2.a corrida: marca de agua 2026-05-01, 13 s frente a 93 s, 3.000.000 hechos en las dos, sin duplicados), rechazo con motivo correcto (`ETL_Rechazos` = 1, no entra a la Fact), reconciliacion cargadas + rechazadas = origen (3.000.001), llave natural, atributo derivado `Inicial_Marca`, y dimensiones estables entre corridas.
+
+- **Corregido: un miembro que solo usa una fila rechazada quedaba huerfano en la dimension** (la corrida mostro `Dim_Vehiculo` con 2.001 miembros: el `VIN-REJECT-TEST` de la fila rechazada). Con `RejectPolicy: Reject`, `SQL_Publicar` ahora cruza primero y solo agrega a las dimensiones los miembros que usa alguna fila aceptada. **Este cambio no se ha ejecutado contra SQL Server.**
+- Limites documentados de la carga incremental: no recoge filas nuevas con fecha anterior a la marca de agua, ni cambios o borrados de filas ya cargadas, y una fila rechazada con fecha anterior a la marca no se reintenta.
+
 ## 1.4.1
 
 Correcciones tras la primera corrida real en Windows (`--all --recreate` contra Databricks, 3.000.000 de filas y metas de Excel: exit 0, reconciliacion correcta).

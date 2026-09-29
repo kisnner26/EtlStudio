@@ -1,4 +1,6 @@
-# Estado de la hoja de ruta (version 1.4.1)
+# Estado de la hoja de ruta (version 1.4.2)
+
+**Segunda corrida real (incremental):** verificados `Reject` (con una fila con fecha fuera de rango), `Incremental` (dos corridas), `NaturalKey` y `Computed` de dimension. **Sin ejercitar con datos reales:** `NullPolicy: Unknown` (no hubo nulos), `NVARCHAR`, metas de Excel modificadas entre corridas, apertura del `.dtsx` en Visual Studio.
 
 **Evidencia real (Windows, `--all --recreate`, Databricks, 3M filas):** exit 0; validacion y carga con `dtexec` correctas (94 s); reconciliacion de 11 comprobaciones OK (filas, llaves, fechas, 4 sumas, 29 periodos, metas de Excel). Ese diseno uso solo los valores por defecto (`Full`, `Fail`, sin llave natural ni `NVARCHAR`). Lo demas, marcado "sin verificar", sigue sin ejecutarse.
 
@@ -12,13 +14,13 @@ Leyenda: **Hecho** = implementado y probado con `tests/run.sh`; **Hecho, sin ver
 | 3 | Confirmar el workflow de Actions | **Pendiente** (se corre al hacer push; las pruebas pasan localmente con Mono) |
 | 4 | Regresion con datos con defecto | **Hecho** (parte pura: perfil y reconciliacion). La ejecucion real contra datos malos sigue pendiente (#1) |
 | 5 | Tablas de paso y publicacion transaccional | **Hecho, sin verificar en Windows** (SQL probado como texto; el paquete no se ejecuto) |
-| 6 | Tabla de rechazos `ETL_Rechazos` | **Hecho, sin verificar en Windows ni contra SQL Server** (`RejectPolicy: Reject`) |
+| 6 | Tabla de rechazos `ETL_Rechazos` | **Hecho y verificado en Windows** con una fila fuera de `Dim_Tiempo`. Rechazo por dimension faltante no ejercitado |
 | 7 | Miembro "Desconocido" y politica de nulos | **Hecho** (`NullPolicy`). Aplica a columnas de dimension; nulos en llave, fecha o medidas siguen deteniendo |
-| 8 | Carga incremental con marca de agua | **Hecho, sin verificar en Windows ni contra SQL Server** (`LoadMode: Incremental`; no detecta cambios ni borrados en filas ya cargadas) |
-| 9 | Lookup por llave natural | **Hecho, sin verificar en Windows** (`NaturalKey`) |
+| 8 | Carga incremental con marca de agua | **Hecho y verificado en Windows** (dos corridas). No recoge filas con fecha anterior a la marca ni cambios o borrados de filas ya cargadas |
+| 9 | Lookup por llave natural | **Hecho y verificado en Windows** (`Dim_Vehiculo` por `vin_corto`) |
 | 10 | Unicode | **Hecho, sin verificar en Windows** (`NVARCHAR`, `DT_WSTR`) |
 | 11 | Dimensiones tipo 2 | **Pendiente** |
-| 12 | Atributos derivados en dimensiones | **Hecho** (`Computed` por dimension; el DDL se probo como texto) |
+| 12 | Atributos derivados en dimensiones | **Hecho y verificado en Windows** (`Inicial_Marca`) |
 | 13 | Varias tablas de hechos y dimensiones conformadas | **Pendiente** |
 | 14 | Abstraer el origen | **Hecho parcialmente**: `SourceKind` cambia la vista previa y los textos. El paquete sigue leyendo por ODBC (ADO NET) y el perfilado usa SQL comun; PostgreSQL y SQL Server no se probaron |
 | 15 | Probar el SQL de perfilado contra Databricks | **Hecho** (perfil, agregados y periodos corrieron contra Databricks) |

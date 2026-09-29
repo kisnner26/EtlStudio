@@ -454,6 +454,17 @@ public static class CoreTests
             s.RejectPolicy = "Otra"; Check(Has(s.Validate(), "RejectPolicy"), "invalida");
             s = Sample(); s.RejectPolicy = "Reject"; s.Fact.Measures[0].Src = "marca"; Check(Has(s.Validate(), "no puede ser tambien"), "medida repetida");
         });
+        Test("rechazos: un miembro que solo usan filas rechazadas no entra a la dimension", () =>
+        {
+            var s = Sample(); s.RejectPolicy = "Reject";
+            var pub = DdlGenerator.Publish(s);
+            Check(pub.IndexOf("INTO #j") < pub.IndexOf("INSERT INTO dbo.Dim_Sucursal"), "el cruce va antes de publicar las dimensiones");
+            Check(pub.Contains("AND EXISTS (SELECT 1 FROM #j j WHERE j.k_1 = s.SK_Sucursal AND j.ok_t IS NOT NULL AND j.k_1 IS NOT NULL AND j.k_2 IS NOT NULL)"), "Dim_Sucursal solo con miembros usados");
+            Check(pub.Contains("j.k_2 = s.SK_Vehiculo"), "Dim_Vehiculo tambien");
+            Check(pub.IndexOf("DROP TABLE #j") > pub.IndexOf("INSERT INTO dbo.ETL_Rechazos"), "#j se libera al final");
+            Check(!DdlGenerator.Publish(Sample()).Contains("#j"), "con Fail no hay cruce");
+            Check(DdlGenerator.Publish(Sample()).Contains("WHERE NOT EXISTS (SELECT 1 FROM dbo.Dim_Sucursal x WHERE x.SK_Sucursal = s.SK_Sucursal);"), "con Fail las dimensiones no cambian");
+        });
         Test("rechazos: la reconciliacion suma lo rechazado y avisa; las fechas fuera de rango ya no detienen", () =>
         {
             var s = Sample(); s.RejectPolicy = "Reject";

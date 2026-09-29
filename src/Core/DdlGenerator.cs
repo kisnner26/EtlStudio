@@ -231,24 +231,11 @@ namespace EtlStudio.Core
             if (full && s.RejectsRows) reseed.Add(DwSpec.RejectTableName);
             foreach (var n in reseed)
                 sb.AppendLine("IF EXISTS (SELECT 1 FROM sys.identity_columns WHERE object_id = OBJECT_ID('dbo." + n + "') AND last_value IS NOT NULL) DBCC CHECKIDENT ('dbo." + n + "', RESEED, 0) WITH NO_INFOMSGS;");
-            foreach (var d in s.Dims)
+            // En modo Reject se cruza la Fact cruda primero: asi solo entran a las dimensiones los miembros que usa alguna fila aceptada
+            // (un miembro que solo aparece en filas rechazadas no debe quedar huerfano en la dimension).
+            string okCond = "j.ok_t IS NOT NULL" + string.Concat(Enumerable.Range(1, s.Dims.Count).Select(k => " AND j.k_" + k + " IS NOT NULL"));
+            if (s.RejectsRows)
             {
-                var cols = d.Key + ", " + string.Join(", ", d.Columns.Select(c => c.Dst));
-                sb.AppendLine("SET IDENTITY_INSERT dbo." + d.Name + " ON;");
-                sb.AppendLine("INSERT INTO dbo." + d.Name + " (" + cols + ") SELECT " + "s." + d.Key + ", " + string.Join(", ", d.Columns.Select(c => "s." + c.Dst))
-                    + " FROM " + stg + d.Name + " s WHERE NOT EXISTS (SELECT 1 FROM dbo." + d.Name + " x WHERE x." + d.Key + " = s." + d.Key + ");");
-                sb.AppendLine("SET IDENTITY_INSERT dbo." + d.Name + " OFF;");
-            }
-            var fcols = "SK_Tiempo, " + string.Concat(s.Dims.Select(d => d.Key + ", ")) + f.BusinessKey.Dst + ", " + string.Join(", ", f.Measures.Select(m => m.Dst));
-            string notLoaded = s.IsIncremental ? " AND NOT EXISTS (SELECT 1 FROM dbo." + f.Name + " x WHERE x." + f.BusinessKey.Dst + " = j." + ("s_" + f.BusinessKey.Src) + ")" : "";
-            if (!s.RejectsRows)
-            {
-                sb.AppendLine("INSERT INTO dbo." + f.Name + " (" + fcols + ") SELECT " + fcols + " FROM " + stg + f.Name
-                    + (s.IsIncremental ? " j WHERE NOT EXISTS (SELECT 1 FROM dbo." + f.Name + " x WHERE x." + f.BusinessKey.Dst + " = j." + f.BusinessKey.Dst + ")" : "") + ";");
-            }
-            else
-            {
-                var raw = RawColumns(s);
                 var sel = new System.Collections.Generic.List<string> { "r.*", "t.SK_Tiempo AS ok_t" };
                 var joins = new StringBuilder();
                 int i = 0;
@@ -262,7 +249,28 @@ namespace EtlStudio.Core
                 sb.AppendLine("SELECT " + string.Join(", ", sel) + " INTO #j FROM " + stg + f.Name + " r LEFT JOIN dbo." + s.Time.Name + " t ON t.SK_Tiempo = r.SK_Tiempo");
                 sb.Append(joins.ToString());
                 sb.AppendLine(";");
-                var okCond = "j.ok_t IS NOT NULL" + string.Concat(Enumerable.Range(1, s.Dims.Count).Select(k => " AND j.k_" + k + " IS NOT NULL"));
+            }
+            int di = 0;
+            foreach (var d in s.Dims)
+            {
+                di++;
+                string used = s.RejectsRows ? " AND EXISTS (SELECT 1 FROM #j j WHERE j.k_" + di + " = s." + d.Key + " AND " + okCond + ")" : "";
+                var cols = d.Key + ", " + string.Join(", ", d.Columns.Select(c => c.Dst));
+                sb.AppendLine("SET IDENTITY_INSERT dbo." + d.Name + " ON;");
+                sb.AppendLine("INSERT INTO dbo." + d.Name + " (" + cols + ") SELECT " + "s." + d.Key + ", " + string.Join(", ", d.Columns.Select(c => "s." + c.Dst))
+                    + " FROM " + stg + d.Name + " s WHERE NOT EXISTS (SELECT 1 FROM dbo." + d.Name + " x WHERE x." + d.Key + " = s." + d.Key + ")" + used + ";");
+                sb.AppendLine("SET IDENTITY_INSERT dbo." + d.Name + " OFF;");
+            }
+            var fcols = "SK_Tiempo, " + string.Concat(s.Dims.Select(d => d.Key + ", ")) + f.BusinessKey.Dst + ", " + string.Join(", ", f.Measures.Select(m => m.Dst));
+            string notLoaded = s.IsIncremental ? " AND NOT EXISTS (SELECT 1 FROM dbo." + f.Name + " x WHERE x." + f.BusinessKey.Dst + " = j." + ("s_" + f.BusinessKey.Src) + ")" : "";
+            if (!s.RejectsRows)
+            {
+                sb.AppendLine("INSERT INTO dbo." + f.Name + " (" + fcols + ") SELECT " + fcols + " FROM " + stg + f.Name
+                    + (s.IsIncremental ? " j WHERE NOT EXISTS (SELECT 1 FROM dbo." + f.Name + " x WHERE x." + f.BusinessKey.Dst + " = j." + f.BusinessKey.Dst + ")" : "") + ";");
+            }
+            else
+            {
+                var raw = RawColumns(s);
                 var ins = "j.SK_Tiempo, " + string.Concat(Enumerable.Range(1, s.Dims.Count).Select(k => "j.k_" + k + ", ")) + "j.s_" + f.BusinessKey.Src + ", " + string.Join(", ", f.Measures.Select(m => "j.s_" + m.Src));
                 sb.AppendLine("INSERT INTO dbo." + f.Name + " (" + fcols + ") SELECT " + ins + " FROM #j j WHERE " + okCond + notLoaded + ";");
                 var motivo = "CASE WHEN j.ok_t IS NULL THEN 'Fecha fuera de " + s.Time.Name + "'" + string.Concat(s.Dims.Select((d, k) => " WHEN j.k_" + (k + 1) + " IS NULL THEN 'Sin dimension " + d.Name + "'")) + " END";
