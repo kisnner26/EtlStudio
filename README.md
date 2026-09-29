@@ -13,7 +13,7 @@ Suelta tu enunciado (**PPTX, DOCX, PDF, XLSX, capturas, TXT/SQL**) o descríbelo
 1. Se lee el contenido de los archivos (los tokens y contraseñas se ocultan antes de enviar texto a la IA).
 2. Claude arma un **plan** (conexion, diseño en estrella, pasos, advertencias) y, si el diseño no valida, lo corrige una vez.
 3. Tu **apruebas** el plan con un clic (o lo editas en *Diseño*).
-4. EtlStudio conecta, crea el DW, genera el paquete SSIS, lo valida, carga, verifica y crea un **reporte .docx** con la evidencia.
+4. EtlStudio conecta, **perfila el origen** (si tiene nulos donde el modelo exige valores, o fechas fuera de `Dim_Tiempo`, se detiene antes de tocar nada), crea el DW, genera el paquete SSIS, lo valida, carga, verifica, **reconcilia el destino contra el origen** y crea un **reporte .docx** con la evidencia.
 
 Si el DSN de Databricks no existe, se crea con el host y el HTTP path del enunciado; **el token lo pegas tu una sola vez** en el dialogo del driver ODBC (la app nunca lo escribe).
 
@@ -27,10 +27,18 @@ Descarga/compila `dist\EtlStudio-Setup.exe` y ejecutalo: instala solo para tu us
 2. **Fuente**: escribes el `SELECT` de origen y ves esquema y filas de muestra.
 3. **Diseno (IA)**: Claude propone el modelo en estrella (dimensiones, hechos, medidas, columnas calculadas) como JSON editable. Tu lo revisas y validas; nada se crea sin tu accion.
 4. **Ejecutar**: crea la base y las tablas (DDL idempotente), **genera un paquete `.dtsx` real** con el modelo de objetos de SSIS, lo valida y lo ejecuta con `dtexec`.
-5. **Verificar**: consultas de solo lectura y comentadas (conteos, huerfanos, duplicados, metas de Excel) y explicacion de los resultados por Claude.
+5. **Verificar**: consultas de solo lectura y comentadas (conteos, huerfanos, duplicados, metas de Excel), la **reconciliacion origen vs destino** y explicacion de los resultados por Claude.
 6. **Asistente**: chat con Claude que conoce tu diseno y el log para diagnosticar errores.
 
-El paquete generado sigue el patron del curso: `SQL_Limpiar_Destino` -> `DFT_Poblar_Dimensiones` (ADO NET -> Conversion de datos -> OLE DB) -> `DFT_Extraer_Origen` (ADO NET -> Conversion de datos a `DT_STR` -> Lookups por dimension -> Columna derivada `SK_Tiempo` -> carga rapida) -> `DFT_Cargar_Metas_Excel` (opcional).
+El paquete generado sigue el patron del curso: `SQL_Auditoria_Inicio` -> `SQL_Limpiar_Destino` -> `DFT_Poblar_Dimensiones` (ADO NET -> Conversion de datos -> OLE DB) -> `DFT_Extraer_Origen` (ADO NET -> Conversion de datos a `DT_STR` -> Lookups por dimension -> Columna derivada `SK_Tiempo` -> carga rapida) -> `DFT_Cargar_Metas_Excel` (opcional) -> `SQL_Auditoria_Fin`.
+
+## Que garantiza (y que no)
+
+- **Nunca pierde hechos en silencio.** Los lookups de la Fact fallan si una fila no encuentra su dimension. Despues de cargar, la **reconciliacion** compara origen y destino: filas, llaves de negocio distintas, fecha minima y maxima y la suma de cada medida (con tolerancia solo por el redondeo a 2 decimales). Si algo no cuadra, el proceso termina en error, pero el reporte con la evidencia se escribe igual.
+- **Rechaza un origen que el modelo no admite** antes de crear nada: nulos en llaves, fechas, dimensiones o medidas, y fechas fuera del rango de `Dim_Tiempo`.
+- **Deja rastro.** Cada corrida queda en `dbo.ETL_Auditoria` (`EnCurso`, `OK` o `Fallido`, con conteos). Una corrida que se cae queda como `EnCurso` y la siguiente la cierra como `Fallido`.
+- **El paquete no guarda secretos** (`DontSaveSensitive`): se puede abrir en otro equipo, que necesitara su propio DSN con el token.
+- **No garantiza** que el diseno propuesto por la IA sea el correcto para tu negocio: revisalo antes de ejecutar. Tampoco compara el contenido columna a columna, solo conteos, llaves, fechas y sumas.
 
 ## Requisitos
 
@@ -59,8 +67,20 @@ Notas para contribuir: los fuentes son UTF-8 con BOM; edita con un editor que re
 ```powershell
 EtlStudio.exe --ddl   samples\autos_databricks.json
 EtlStudio.exe --build samples\autos_databricks.json salida.dtsx
-EtlStudio.exe --all   samples\autos_databricks.json salida.dtsx [--recreate]   # crea DW, genera, valida, ejecuta y verifica
+EtlStudio.exe --all   samples\autos_databricks.json salida.dtsx [--recreate]   # el mismo Pipeline de la interfaz; codigo 1 si algo falla o no reconcilia
+EtlStudio.exe --validate  samples\autos_databricks.json                        # valida el diseno sin tocar ninguna base
+EtlStudio.exe --reconcile samples\autos_databricks.json                        # compara el DW ya cargado con el origen (codigo 1 si no coincide)
 ```
+
+## Pruebas
+
+El nucleo (validacion del diseno, DDL, SQL de verificacion y logica de reconciliacion) tiene pruebas que **no necesitan SQL Server, SSIS ni ODBC**:
+
+```bash
+./tests/run.sh          # macOS/Linux con Mono
+```
+
+En Windows: `msbuild tests\EtlStudio.Tests.csproj` y ejecuta `tests\bin\Release\EtlStudio.Tests.exe`. La integracion continua (GitHub Actions) las corre en cada push. La generacion del paquete SSIS y la carga real requieren el runtime de SSIS de Windows y no estan cubiertas por estas pruebas: se comprueban con `--all` sobre una base real.
 
 ## Seguridad
 
@@ -75,3 +95,6 @@ EtlStudio.exe --all   samples\autos_databricks.json salida.dtsx [--recreate]   #
 - El paquete usa el runtime de SSIS 2022 (v16); Visual Studio 2026 puede pedir actualizar el formato al abrirlo.
 - Las columnas de dimension y la llave de negocio son `VARCHAR` (se convierten a `DT_STR`, pagina 1252).
 - Un modelo en estrella con una tabla de hechos; dimensiones de cambio lento (SCD) no incluidas.
+- Solo carga completa (full reload): el paquete vacia el destino antes de cargar. No hay carga incremental.
+- Las medidas deben ser numericas y las dimensiones no admiten nulos: el perfilado del origen se detiene en lugar de inventar un valor por defecto.
+- Los lookups de dimension comparan las columnas de la dimension (no una llave de negocio unica), asi que dos filas del origen que difieran solo en mayusculas o acentos pueden colapsar segun la collation.

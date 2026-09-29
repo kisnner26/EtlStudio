@@ -9,6 +9,7 @@ namespace EtlStudio.Core
     public class PipelineResult
     {
         public string PackagePath, ReportPath, VerificationText;
+        public bool ReconciliationOk = true;
         public List<KeyValuePair<Check, DataTable>> Checks = new List<KeyValuePair<Check, DataTable>>();
     }
 
@@ -19,6 +20,7 @@ namespace EtlStudio.Core
         {
             new[] { "dsn", "Conectar con el origen" },
             new[] { "sql", "Conectar con SQL Server" },
+            new[] { "profile", "Perfilar y validar el origen" },
             new[] { "dw", "Crear el Data Warehouse" },
             new[] { "pkg", "Generar el paquete SSIS" },
             new[] { "validate", "Validar el paquete" },
@@ -28,7 +30,7 @@ namespace EtlStudio.Core
         };
 
         /// <param name="step">(id, estado: run | ok | fail)</param>
-        public static PipelineResult Run(Plan plan, bool recreate, string outDir, Action<string, string> step, Action<string> log)
+        public static PipelineResult Run(Plan plan, bool recreate, string outDir, Action<string, string> step, Action<string> log, string packagePath = null)
         {
             var s = plan.Spec; var res = new PipelineResult();
             Directory.CreateDirectory(outDir);
@@ -61,6 +63,17 @@ namespace EtlStudio.Core
 
             stage("sql", () => log(SqlRunner.Test(s.SqlServer)));
 
+            // Antes de tocar nada: el origen debe cumplir lo que el modelo exige (sin nulos en llaves, fechas dentro de Dim_Tiempo...).
+            IDictionary<string, object> profile = null;
+            stage("profile", () =>
+            {
+                if (s.Goals != null && !File.Exists(s.Goals.ExcelPath)) throw new FileNotFoundException("No existe el Excel de metas: " + s.Goals.ExcelPath);
+                profile = Reconciliation.ProfileSource(s);
+                var issues = Reconciliation.Preflight(s, profile);
+                if (issues.Count > 0) throw new Exception("El origen no cumple lo que exige el modelo:\n - " + string.Join("\n - ", issues));
+                log("Origen validado: " + Convert.ToString(profile["n_rows"]) + " filas, sin nulos en las columnas que el modelo exige.");
+            });
+
             stage("dw", () =>
             {
                 if (recreate) SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.DropDatabase(s));
@@ -69,27 +82,40 @@ namespace EtlStudio.Core
                 log("Base '" + s.DwName + "' y tablas listas en " + s.SqlServer + ".");
             });
 
-            res.PackagePath = Path.Combine(outDir, s.DwName + ".dtsx");
+            res.PackagePath = packagePath ?? Path.Combine(outDir, s.DwName + ".dtsx");
             stage("pkg", () => { new SsisBuilder(s).Build(res.PackagePath); log("Paquete: " + res.PackagePath); });
 
             stage("validate", () => Dtx(res.PackagePath, true, log));
             stage("load", () => Dtx(res.PackagePath, false, log));
 
-            stage("verify", () =>
+            // Si la reconciliacion no cuadra, igual se escribe el reporte (con la evidencia) y despues se avisa con una excepcion.
+            ReconciliationException reconError = null;
+            try
             {
-                var text = new System.Text.StringBuilder();
-                foreach (var c in Verification.For(s))
+                stage("verify", () =>
                 {
-                    var dt = SqlRunner.Query(s.SqlServer, s.DwName, c.Sql);
-                    res.Checks.Add(new KeyValuePair<Check, DataTable>(c, dt));
-                    text.AppendLine("## " + c.Title).AppendLine(SourceReader.SampleRows(dt, 12));
-                }
-                res.VerificationText = text.ToString();
-                log("Verificaciones ejecutadas: " + res.Checks.Count + ".");
-            });
+                    var text = new System.Text.StringBuilder();
+                    foreach (var c in Verification.For(s))
+                    {
+                        var dt = SqlRunner.Query(s.SqlServer, s.DwName, c.Sql);
+                        res.Checks.Add(new KeyValuePair<Check, DataTable>(c, dt));
+                        text.AppendLine("## " + c.Title).AppendLine(SourceReader.SampleRows(dt, 12));
+                    }
+                    var rc = Reconciliation.Run(s, profile);
+                    var rt = rc.ToTable();
+                    res.Checks.Add(new KeyValuePair<Check, DataTable>(new Check { Title = "R) Reconciliacion origen vs destino", Explain = Reconciliation.Explain, Sql = rc.Sql }, rt));
+                    text.AppendLine("## R) Reconciliacion origen vs destino").AppendLine(SourceReader.SampleRows(rt, 30));
+                    res.VerificationText = text.ToString();
+                    res.ReconciliationOk = rc.Ok;
+                    log("Verificaciones ejecutadas: " + res.Checks.Count + ". " + rc.Summary());
+                    if (!rc.Ok) throw new ReconciliationException("Los datos cargados no coinciden con el origen:\n" + rc.FailureText());
+                });
+            }
+            catch (ReconciliationException ex) { reconError = ex; }
 
             res.ReportPath = Path.Combine(outDir, "Reporte_" + s.DwName + ".docx");
             stage("report", () => { WriteReport(plan, res); log("Reporte: " + res.ReportPath); });
+            if (reconError != null) throw new ReconciliationException(reconError.Message + "\nEl reporte con el detalle esta en: " + res.ReportPath);
             return res;
         }
 
@@ -105,6 +131,7 @@ namespace EtlStudio.Core
             var d = new DocxWriter().Title(string.IsNullOrWhiteSpace(plan.Titulo) ? "Reporte del Data Warehouse" : plan.Titulo,
                 "Generado por EtlStudio  ·  " + DateTime.Now.ToString("yyyy-MM-dd HH:mm"));
             d.Heading("Resumen").Para(plan.Resumen ?? "");
+            d.Para(res.ReconciliationOk ? "Reconciliacion origen vs destino: los datos cargados coinciden con el origen." : "Reconciliacion origen vs destino: NO COINCIDEN, revisa la seccion Verificacion.", true);
             d.Heading("Arquitectura");
             d.Bullet("Base de datos: " + s.DwName + " en " + s.SqlServer);
             d.Bullet("Origen: DSN " + s.SourceDsn + " (Databricks via ODBC)");
@@ -114,8 +141,9 @@ namespace EtlStudio.Core
             if (s.Goals != null) d.Bullet("Metas desde Excel: " + s.Goals.Table);
             d.Heading("Consulta de origen").Code(s.SourceQuery);
             d.Heading("Paquete SSIS").Para(res.PackagePath);
-            d.Bullet("SQL_Limpiar_Destino  →  DFT_Poblar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel" : ""));
-            d.Bullet("Conversion de datos a DT_STR, Lookups por dimension, columna derivada SK_Tiempo y carga rapida.");
+            d.Bullet("SQL_Auditoria_Inicio  →  SQL_Limpiar_Destino  →  DFT_Poblar_Dimensiones  →  DFT_Extraer_Origen  " + (s.Goals != null ? "→  DFT_Cargar_Metas_Excel  " : "") + "→  SQL_Auditoria_Fin");
+            d.Bullet("Conversion de datos a DT_STR, Lookups por dimension (una llave sin dimension detiene la carga), columna derivada SK_Tiempo y carga rapida.");
+            d.Bullet("Cada corrida queda registrada en dbo." + DwSpec.AuditTableName + " (EnCurso, OK o Fallido).");
             d.Heading("Verificacion");
             foreach (var kv in res.Checks)
             {

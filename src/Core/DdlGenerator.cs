@@ -65,6 +65,10 @@ namespace EtlStudio.Core
                 sb.AppendLine();
             }
 
+            sb.AppendLine("-- Auditoria de ejecuciones");
+            sb.AppendLine(AuditDdl());
+            sb.AppendLine();
+
             sb.AppendLine("-- Poblar dimension tiempo (set-based, idempotente)");
             sb.AppendLine("DECLARE @ini DATE = '" + t.From + "', @fin DATE = '" + t.To + "';");
             sb.AppendLine(";WITH n AS (SELECT TOP (DATEDIFF(DAY,@ini,@fin)+1) ROW_NUMBER() OVER (ORDER BY (SELECT 1)) - 1 AS i FROM sys.all_objects a CROSS JOIN sys.all_objects b)");
@@ -74,6 +78,33 @@ namespace EtlStudio.Core
             sb.AppendLine("FROM (SELECT DATEADD(DAY, i, @ini) AS d FROM n) x");
             sb.AppendLine("WHERE NOT EXISTS (SELECT 1 FROM dbo." + t.Name + " t WHERE t.SK_Tiempo = CAST(CONVERT(VARCHAR(8), x.d, 112) AS INT));");
             return sb.ToString();
+        }
+
+        /// <summary>Tabla de auditoria de ejecuciones (idempotente). Sobrevive a la limpieza del destino.</summary>
+        public static string AuditDdl()
+        {
+            return "IF OBJECT_ID('dbo." + DwSpec.AuditTableName + "') IS NULL CREATE TABLE dbo." + DwSpec.AuditTableName + " (\n" +
+                   "    Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY, Paquete VARCHAR(128) NOT NULL,\n" +
+                   "    Inicio DATETIME NOT NULL DEFAULT GETDATE(), Fin DATETIME NULL, Estado VARCHAR(20) NOT NULL,\n" +
+                   "    Filas_Fact BIGINT NULL, Filas_Dimensiones BIGINT NULL);";
+        }
+
+        /// <summary>Primer paso del paquete: cierra como 'Fallido' las corridas que quedaron abiertas y abre una nueva.</summary>
+        public static string AuditStart(DwSpec s)
+        {
+            return AuditDdl() + "\n" +
+                   "UPDATE dbo." + DwSpec.AuditTableName + " SET Fin = GETDATE(), Estado = 'Fallido' WHERE Estado = 'EnCurso';\n" +
+                   "INSERT INTO dbo." + DwSpec.AuditTableName + " (Paquete, Estado) VALUES (N'" + s.DwName + "', 'EnCurso');";
+        }
+
+        /// <summary>Ultimo paso: solo se alcanza si todo el flujo anterior termino bien.</summary>
+        public static string AuditEnd(DwSpec s)
+        {
+            var dims = string.Join(" + ", s.Dims.Select(d => "(SELECT COUNT_BIG(*) FROM dbo." + d.Name + ")"));
+            return "UPDATE dbo." + DwSpec.AuditTableName + " SET Fin = GETDATE(), Estado = 'OK',\n" +
+                   "    Filas_Fact = (SELECT COUNT_BIG(*) FROM dbo." + s.Fact.Name + "),\n" +
+                   "    Filas_Dimensiones = " + dims + "\n" +
+                   "WHERE Id = (SELECT MAX(Id) FROM dbo." + DwSpec.AuditTableName + " WHERE Estado = 'EnCurso');";
         }
 
         /// <summary>Sentencias de limpieza previas a cada carga (orden respetando FKs, reseed condicional).</summary>

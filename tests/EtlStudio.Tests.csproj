@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pruebas del nucleo (sin SQL Server, SSIS ni ODBC). Windows: msbuild tests\EtlStudio.Tests.csproj  y luego  tests\bin\Release\EtlStudio.Tests.exe -->
+<Project ToolsVersion="Current" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>EtlStudio.Tests</RootNamespace>
+    <AssemblyName>EtlStudio.Tests</AssemblyName>
+    <TargetFrameworkVersion Condition=" '$(TargetFrameworkVersion)' == '' ">v4.7.2</TargetFrameworkVersion>
+    <LangVersion>latest</LangVersion>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <BaseIntermediateOutputPath>obj\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="CoreTests.cs" />
+    <Compile Include="..\src\Core\Spec.cs"><Link>Core\Spec.cs</Link></Compile>
+    <Compile Include="..\src\Core\DdlGenerator.cs"><Link>Core\DdlGenerator.cs</Link></Compile>
+    <Compile Include="..\src\Core\Verification.cs"><Link>Core\Verification.cs</Link></Compile>
+    <Compile Include="..\src\Core\Reconciliation.cs"><Link>Core\Reconciliation.cs</Link></Compile>
+    <Compile Include="..\src\Core\Tools.cs"><Link>Core\Tools.cs</Link></Compile>
+    <Compile Include="..\src\Core\Plan.cs"><Link>Core\Plan.cs</Link></Compile>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

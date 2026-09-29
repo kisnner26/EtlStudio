@@ -13,7 +13,7 @@
     <LangVersion>latest</LangVersion>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationIcon>assets\EtlStudio.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Prefer32Bit>false</Prefer32Bit>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -59,6 +59,7 @@
     <Compile Include="src\Core\Tools.cs" />
     <Compile Include="src\Core\ClaudeClient.cs" />
     <Compile Include="src\Core\Verification.cs" />
+    <Compile Include="src\Core\Reconciliation.cs" />
     <Compile Include="src\Core\Documents.cs" />
     <Compile Include="src\Core\Plan.cs" />
     <Compile Include="src\Core\DocxWriter.cs" />

@@ -738,10 +738,17 @@ namespace EtlStudio.UI
             DwSpec s; if (!TrySpec(out s) || !ConfirmRecreate(s)) return; bool rc = chkRecreate.IsChecked == true; string path = txtOut.Text.Trim();
             Work("Proceso completo", () =>
             {
-                Log("▶ 1/4 Crear DW"); CreateDwCore(s, rc);
-                Log("▶ 2/4 Generar paquete"); GenerateCore(s, path);
-                Log("▶ 3/4 Validar"); RunCore(path, true);
-                Log("▶ 4/4 Ejecutar carga (puede tardar unos minutos)"); RunCore(path, false);
+                Log("▶ 1/5 Validar el origen");
+                var profile = Reconciliation.ProfileSource(s);
+                var issues = Reconciliation.Preflight(s, profile);
+                if (issues.Count > 0) throw new Exception("El origen no cumple lo que exige el modelo:\n - " + string.Join("\n - ", issues));
+                Log("▶ 2/5 Crear DW"); CreateDwCore(s, rc);
+                Log("▶ 3/5 Generar paquete"); GenerateCore(s, path);
+                Log("▶ 4/5 Validar y ejecutar la carga (puede tardar unos minutos)"); RunCore(path, true); RunCore(path, false);
+                Log("▶ 5/5 Reconciliar el destino con el origen");
+                var recon = Reconciliation.Run(s, profile);
+                Log("   " + recon.Summary());
+                if (!recon.Ok) throw new ReconciliationException("Los datos cargados no coinciden con el origen:\n" + recon.FailureText());
                 Log("✔ Listo. Ve a Verificar.");
             }, true);
         }
@@ -787,6 +794,10 @@ namespace EtlStudio.UI
                     list.Add(new KeyValuePair<Check, DataTable>(c, dt));
                     report.AppendLine("## " + c.Title).AppendLine(SourceReader.SampleRows(dt, 12));
                 }
+                ReconResult rc; try { rc = Reconciliation.Run(s); } catch (Exception ex) { rc = Reconciliation.Failed(ex.Message); }
+                var rt = rc.ToTable();
+                list.Add(new KeyValuePair<Check, DataTable>(new Check { Title = "R) Reconciliacion origen vs destino", Explain = Reconciliation.Explain, Sql = rc.Sql }, rt));
+                report.AppendLine("## R) Reconciliacion origen vs destino").AppendLine(SourceReader.SampleRows(rt, 30));
                 lastVerification = report.ToString();
                 Dispatcher.Invoke(() => PopulateVerify(list));
             });

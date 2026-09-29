@@ -36,16 +36,17 @@ namespace EtlStudio.Core
 
             var app = new Application();
             pkg = new Package { Name = "Package" };
-            pkg.ProtectionLevel = DTSProtectionLevel.EncryptSensitiveWithUserKey;
+            pkg.ProtectionLevel = DTSProtectionLevel.DontSaveSensitive;   // no guarda secretos: el token vive en el DSN, y asi abre en cualquier equipo
             pkg.Description = "ETL generado por EtlStudio: " + spec.SourceDsn + " -> " + spec.DwName;
 
-            cmSql = pkg.Connections.Add("OLEDB"); cmSql.Name = "localhost." + spec.DwName;
+            cmSql = pkg.Connections.Add("OLEDB"); cmSql.Name = spec.DwName;
             cmSql.ConnectionString = "Data Source=" + spec.SqlServer + ";Initial Catalog=" + spec.DwName +
                 ";Provider=MSOLEDBSQL;Integrated Security=SSPI;Use Encryption for Data=True;Trust Server Certificate=True;Auto Translate=False;";
             cmDbx = pkg.Connections.Add("ADO.NET:System.Data.Odbc.OdbcConnection, System.Data, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089");
-            cmDbx.Name = spec.SourceDsn + ".token"; cmDbx.ConnectionString = "Dsn=" + spec.SourceDsn + ";";
+            cmDbx.Name = spec.SourceDsn; cmDbx.ConnectionString = "Dsn=" + spec.SourceDsn + ";";
 
             var steps = new List<TaskHost>();
+            steps.Add(ExecSql("SQL_Auditoria_Inicio", DdlGenerator.AuditStart(spec)));
             steps.Add(ExecSql("SQL_Limpiar_Destino", DdlGenerator.Cleanup(spec)));
             steps.Add(BuildDimensionsFlow());
             steps.Add(BuildFactFlow());
@@ -55,6 +56,7 @@ namespace EtlStudio.Core
                 cmXls.ConnectionString = "Provider=Microsoft.ACE.OLEDB.16.0;Data Source=" + spec.Goals.ExcelPath + ";Extended Properties=\"Excel 12.0;HDR=YES\";";
                 steps.Add(BuildGoalsFlow());
             }
+            steps.Add(ExecSql("SQL_Auditoria_Fin", DdlGenerator.AuditEnd(spec)));   // solo se alcanza si todo lo anterior termino bien
             for (int i = 1; i < steps.Count; i++) pkg.PrecedenceConstraints.Add((Executable)steps[i - 1], (Executable)steps[i]);
 
             app.SaveToXml(outPath, pkg, null);
@@ -97,12 +99,12 @@ namespace EtlStudio.Core
             foreach (var d in spec.Dims)
             {
                 Comp lk = Look(p, "LK_" + d.Name.Replace("Dim_", ""), outp, "[dbo].[" + d.Name + "]",
-                    d.Columns.Select(c => "Copy of " + c.Src).ToArray(), d.Columns.Select(c => c.Dst).ToArray(), new[] { d.Key });
+                    d.Columns.Select(c => "Copy of " + c.Src).ToArray(), d.Columns.Select(c => c.Dst).ToArray(), new[] { d.Key }, true);
                 outp = MatchOut(lk);
             }
             string dateCol = spec.Fact.DateColumn;
             Comp dt = Derive(p, "DC_SK_Tiempo", outp, "SK_Tiempo",
-                "(DT_I4)(SUBSTRING((DT_WSTR,30)" + dateCol + ", 1, 4) + SUBSTRING((DT_WSTR,30)" + dateCol + ", 6, 2) + SUBSTRING((DT_WSTR,30)" + dateCol + ", 9, 2))", dateCol);
+                "(DT_I4)(YEAR((DT_DBTIMESTAMP)" + dateCol + ") * 10000 + MONTH((DT_DBTIMESTAMP)" + dateCol + ") * 100 + DAY((DT_DBTIMESTAMP)" + dateCol + "))", dateCol);
 
             var map = new Dictionary<string, string> { { "SK_Tiempo", "SK_Tiempo" } };
             foreach (var d in spec.Dims) map[d.Key] = d.Key;
@@ -121,13 +123,13 @@ namespace EtlStudio.Core
             Refresh(x);
             Comp cx = DataConv(p, "Conversion de datos", FirstOut(x), g.ExcelDimColumn, ColumnMapLen(jc));
             Comp lx = Look(p, "LK_" + gd.Name.Replace("Dim_", ""), FirstOut(cx), "[dbo].[" + gd.Name + "]",
-                new[] { "Copy of " + g.ExcelDimColumn }, new[] { jc.Dst }, new[] { gd.Key });
+                new[] { "Copy of " + g.ExcelDimColumn }, new[] { jc.Dst }, new[] { gd.Key }, false);
             string f = g.ExcelDateColumn;
             Comp dx = Derive(p, "DC_SK_Tiempo", MatchOut(lx), "SK_Tiempo",
                 "(DT_I4)((DT_WSTR,4)YEAR((DT_DBTIMESTAMP)" + f + ") + RIGHT(\"0\" + (DT_WSTR,2)MONTH((DT_DBTIMESTAMP)" + f + "),2) + \"01\")", f);
             OleDest(p, "Destino " + g.Table, FirstOut(dx), "[dbo].[" + g.Table + "]",
                 new Dictionary<string, string> { { "SK_Tiempo", "SK_Tiempo" }, { gd.Key, gd.Key }, { g.ExcelMeasureColumn, "Monto_Meta" } },
-                "TABLOCK,CHECK_CONSTRAINTS,ROWS_PER_BATCH = 60");
+                "TABLOCK,CHECK_CONSTRAINTS");
             return th;
         }
 
@@ -215,11 +217,13 @@ namespace EtlStudio.Core
             return c;
         }
 
-        Comp Look(MainPipe pipe, string name, IDTSOutput100 from, string table, string[] joinIn, string[] joinRef, string[] outRef)
+        Comp Look(MainPipe pipe, string name, IDTSOutput100 from, string table, string[] joinIn, string[] joinRef, string[] outRef, bool failOnNoMatch)
         {
             var c = NewComp(pipe, name, LookupId); UseConn(c, cmSql);
             c.Inst.SetComponentProperty("SqlCommand", "select * from " + table);
-            c.Inst.SetComponentProperty("NoMatchBehavior", 1); // redirigir filas a la salida "No Match"
+            // 0 = una fila sin coincidencia es un error y el componente falla (nunca se pierden hechos en silencio);
+            // 1 = se redirige a la salida "No Match" (solo para las metas de Excel, cuyo conteo se reconcilia contra el archivo).
+            c.Inst.SetComponentProperty("NoMatchBehavior", failOnNoMatch ? 0 : 1);
             Connect(pipe, from, c);
             Refresh(c);
             var inp = c.Meta.InputCollection[0]; var vi = inp.GetVirtualInput();

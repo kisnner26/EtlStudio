@@ -85,6 +85,18 @@ namespace EtlStudio.Core
             }
         }
 
+        /// <summary>Ejecuta una consulta completa (sin LIMIT) contra el DSN de origen; pensada para agregados.</summary>
+        public static DataTable Query(string dsn, string sql)
+        {
+            using (var c = new OdbcConnection(Conn(dsn)))
+            {
+                c.Open();
+                var dt = new DataTable();
+                using (var rd = new OdbcCommand(sql, c) { CommandTimeout = 600 }.ExecuteReader()) dt.Load(rd);
+                return dt;
+            }
+        }
+
         public static string DescribeSchema(DataTable dt)
         {
             var sb = new StringBuilder();

@@ -12,6 +12,8 @@ namespace EtlStudio
         /// Sin argumentos: abre la interfaz grafica.
         /// --build spec.json salida.dtsx : genera el paquete SSIS desde la consola (util para pruebas/CI).
         /// --ddl spec.json               : imprime el DDL.
+        /// --validate spec.json          : valida el diseno sin tocar bases de datos.
+        /// --reconcile spec.json         : compara el DW cargado contra el origen (codigo 1 si no coincide).
         /// </summary>
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
         static extern bool AttachConsole(int dwProcessId);
@@ -60,28 +62,48 @@ namespace EtlStudio
                 }
                 catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
             }
-            if (args.Length >= 3 && args[0] == "--all")
+            if (args.Length >= 2 && args[0] == "--validate")
             {
-                // Flujo completo sin ventana: crear DW -> generar paquete -> validar -> ejecutar -> verificar.
+                // Valida el diseno sin tocar ninguna base de datos: EtlStudio.exe --validate spec.json
+                try
+                {
+                    var errs = DwSpec.FromJson(File.ReadAllText(args[1])).Validate();
+                    foreach (var e in errs) Console.Error.WriteLine("  - " + e);
+                    Console.WriteLine(errs.Count == 0 ? "Diseno valido." : errs.Count + " problemas.");
+                    return errs.Count == 0 ? 0 : 1;
+                }
+                catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
+            }
+            if (args.Length >= 2 && args[0] == "--reconcile")
+            {
+                // Compara el DW ya cargado contra el origen: EtlStudio.exe --reconcile spec.json  (codigo 1 si no coincide)
                 try
                 {
                     var s = DwSpec.FromJson(File.ReadAllText(args[1]));
                     var errs = s.Validate(); if (errs.Count > 0) throw new Exception(string.Join("; ", errs));
-                    bool recreate = args.Length > 3 && args[3] == "--recreate";
-                    if (recreate) SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.DropDatabase(s));
-                    SqlRunner.Exec(s.SqlServer, "master", DdlGenerator.CreateDatabase(s));
-                    SqlRunner.Exec(s.SqlServer, s.DwName, DdlGenerator.Tables(s));
-                    Console.WriteLine("DW listo. Generando paquete...");
-                    new SsisBuilder(s).Build(args[2]);
-                    if (DtExec.Run(args[2], true, l => { })!= 0) throw new Exception("Fallo la validacion del paquete");
-                    Console.WriteLine("Paquete valido. Ejecutando carga...");
-                    if (DtExec.Run(args[2], false, l => { if (l.Contains("Error") || l.Contains("Description")) Console.WriteLine(l); }) != 0) throw new Exception("Fallo la ejecucion");
-                    foreach (var c in Verification.For(s))
+                    var r = Reconciliation.Run(s);
+                    Console.WriteLine(SourceReader.SampleRows(r.ToTable(), 50));
+                    Console.WriteLine(r.Summary());
+                    return r.Ok ? 0 : 1;
+                }
+                catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
+            }
+            if (args.Length >= 3 && args[0] == "--all")
+            {
+                // Flujo completo sin ventana (el mismo Pipeline que usa la interfaz): perfilar -> DW -> paquete -> validar -> cargar -> verificar y reconciliar -> reporte.
+                try
+                {
+                    var s = DwSpec.FromJson(File.ReadAllText(args[1]));
+                    var errs = s.Validate(); if (errs.Count > 0) throw new Exception(string.Join("; ", errs));
+                    var pkgPath = Path.GetFullPath(args[2]);
+                    var r = Pipeline.Run(new Plan { Titulo = s.DwName, Spec = s }, args.Length > 3 && args[3] == "--recreate", Path.GetDirectoryName(pkgPath),
+                        (id, st) => Console.WriteLine("[" + st + "] " + id), m => Console.WriteLine("    " + m), pkgPath);
+                    foreach (var kv in r.Checks)
                     {
-                        Console.WriteLine("== " + c.Title);
-                        Console.WriteLine(EtlStudio.Core.SourceReader.SampleRows(SqlRunner.Query(s.SqlServer, s.DwName, c.Sql), 6));
+                        Console.WriteLine("== " + kv.Key.Title);
+                        Console.WriteLine(SourceReader.SampleRows(kv.Value, 30));
                     }
-                    return 0;
+                    Console.WriteLine("Reporte: " + r.ReportPath); return 0;
                 }
                 catch (Exception ex) { Console.Error.WriteLine("ERROR: " + ex.Message); return 1; }
             }
