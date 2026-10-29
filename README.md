@@ -38,7 +38,7 @@ El paquete generado sigue el patron del curso: `SQL_Auditoria_Inicio` -> `SQL_Pr
 - `NullPolicy` (`Fail` | `Unknown`): que hacer con un nulo en una columna de dimension.
 - Tipos `VARCHAR(n)` o `NVARCHAR(n)` (Unicode) en dimensiones y llave de negocio.
 - `RejectPolicy` (`Fail` | `Reject`): con `Reject`, las filas sin dimension o con fecha fuera de `Dim_Tiempo` se guardan en `dbo.ETL_Rechazos` y se carga el resto.
-- `LoadMode` (`Full` | `Incremental`): la carga incremental lee solo lo posterior a la ultima fecha cargada.
+- `LoadMode` (`Full` | `Incremental`): la carga incremental lee desde la ultima fecha cargada (inclusive).
 - `Computed` (por dimension): atributos derivados persistidos, por ejemplo `{"Name":"Inicial","Expr":"UPPER(LEFT(Marca, 1))"}`.
 - `SourceKind`: `Databricks` | `PostgreSQL` | `SqlServer` | `Generic`.
 Ejemplo con todo: `samples/autos_incremental.json`.
@@ -49,12 +49,12 @@ Ejemplo con todo: `samples/autos_incremental.json`.
 
 ## Que garantiza (y que no)
 
-- **Nunca pierde hechos en silencio.** Los lookups de la Fact fallan si una fila no encuentra su dimension. Despues de cargar, la **reconciliacion** compara origen y destino: filas, llaves de negocio distintas, fecha minima y maxima y la suma de cada medida (con tolerancia solo por el redondeo a 2 decimales). Si algo no cuadra, el proceso termina en error, pero el reporte con la evidencia se escribe igual.
-- **Rechaza un origen que el modelo no admite** antes de crear nada: nulos en llaves, fechas, dimensiones o medidas, y fechas fuera del rango de `Dim_Tiempo`.
+- **Reconciliacion de hechos.** Con `RejectPolicy: Fail`, una fila sin dimension detiene la carga; con `Reject`, queda registrada en `dbo.ETL_Rechazos`. Despues de cargar, la **reconciliacion** compara origen y destino: filas, llaves de negocio distintas, fecha minima y maxima y la suma de cada medida (con tolerancia solo por el redondeo a 2 decimales). Si algo no cuadra, el proceso termina en error, pero el reporte con la evidencia se escribe igual.
+- **Valida el origen segun las politicas elegidas**: el modo estricto detiene nulos y fechas fuera de rango; `Unknown` y `Reject` permiten los casos documentados.
 - **Un fallo no destruye el DW.** La carga escribe en tablas de paso y el destino solo cambia al publicar, en una transaccion.
 - **Deja rastro.** Cada corrida queda en `dbo.ETL_Auditoria` (`EnCurso`, `OK` o `Fallido`, con conteos). Una corrida que se cae queda como `EnCurso` y la siguiente la cierra como `Fallido`.
 - **El paquete no guarda secretos** (`DontSaveSensitive`): se puede abrir en otro equipo, que necesitara su propio DSN con el token.
-- **No garantiza** que el diseno propuesto por la IA sea el correcto para tu negocio: revisalo antes de ejecutar. Tampoco compara el contenido columna a columna, solo conteos, llaves, fechas y sumas. La carga es completa (no incremental) y una llave sin dimension detiene la carga en lugar de enviarse a una tabla de rechazos.
+- **No garantiza** que el diseno propuesto por la IA sea el correcto para tu negocio: revisalo antes de ejecutar. Tampoco compara el contenido columna a columna, solo conteos, llaves, fechas y sumas. El modo `Full` recarga el destino. `Incremental` agrega hechos por llave de negocio desde una marca de agua; no captura actualizaciones, borrados ni altas tardias anteriores a esa fecha. `RejectPolicy: Fail` detiene la carga ante una fila invalida; `Reject` conserva el motivo en `dbo.ETL_Rechazos`.
 
 ## Requisitos
 
@@ -111,6 +111,6 @@ En Windows: `msbuild tests\EtlStudio.Tests.csproj` y ejecuta `tests\bin\Release\
 - El paquete usa el runtime de SSIS 2022 (v16); Visual Studio 2026 puede pedir actualizar el formato al abrirlo.
 - Las columnas de dimension y la llave de negocio son `VARCHAR` (se convierten a `DT_STR`, pagina 1252).
 - Un modelo en estrella con una tabla de hechos; dimensiones de cambio lento (SCD) no incluidas.
-- Solo carga completa (full reload): el paquete vacia el destino antes de cargar. No hay carga incremental.
-- Las medidas deben ser numericas y las dimensiones no admiten nulos: el perfilado del origen se detiene en lugar de inventar un valor por defecto.
+- `LoadMode: Full` publica una recarga completa. `Incremental` agrega hechos nuevos desde la ultima fecha cargada, sin CDC: no recoge actualizaciones, borrados ni filas nuevas anteriores a la marca de agua. Un rechazo anterior a la marca no se reintenta automaticamente.
+- Las medidas deben ser numericas. `NullPolicy: Unknown` permite miembros desconocidos; con la politica estricta, los nulos se rechazan. Revisar estas politicas antes de cargar.
 - Los lookups de dimension comparan las columnas de la dimension (no una llave de negocio unica), asi que dos filas del origen que difieran solo en mayusculas o acentos pueden colapsar segun la collation.
